@@ -1,0 +1,36 @@
+{
+  "manifest_version": 3,
+  "name": "AI CRM Extractor",
+  "version": "1.0",
+
+  "permissions": [
+    "activeTab",
+    "sidePanel",
+    "scripting",
+    "storage",
+    "tabs"
+  ],
+
+  "host_permissions": [
+    "<all_urls>"
+  ],
+
+  "action": {
+    "default_title": "AI Lead Scraper"
+  },
+
+  "side_panel": {
+    "default_path": "popup.html"
+  },
+
+  "background": {
+    "service_worker": "background.js"
+  },
+
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"]
+    }
+  ]
+}
