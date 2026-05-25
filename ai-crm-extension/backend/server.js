@@ -8,8 +8,8 @@ const cors = require("cors")
 const app = express()
 const PORT = 3000
 const OPENAI_MODEL = process.env.OPENAI_MODEL
-const DIRECT_MAP_CHAR_LIMIT = 8000
-const CHUNK_CHAR_LIMIT = 5000
+const DIRECT_MAP_CHAR_LIMIT = 100000
+const CHUNK_CHAR_LIMIT = 50000
 
 app.use(cors())
 app.use(express.json({ limit: "10mb" }))
@@ -30,7 +30,7 @@ app.post("/map-profile", async (req, res) => {
   }
 
   try {
-    const mappedProfile = process.env.OPENAI_API_KEY
+    const mappedProfile = hasOpenAiKey()
       ? await mapWithOpenAI(rawProfile)
       : mapWithoutAi(rawProfile)
 
@@ -59,57 +59,217 @@ app.post("/extract", (req, res) => {
 })
 
 async function mapWithOpenAI(rawProfile) {
-  const chunks = createProfileMappingChunks(rawProfile)
-  const partialExtractions = []
-
-  for (const chunk of chunks) {
-    partialExtractions.push(await extractPartialChunkWithOpenAI(chunk, chunks.length))
-  }
-
-  const mergedExtraction = mergePartialExtractions(partialExtractions, rawProfile)
-  const mappedProfile = await mapMergedExtractionWithOpenAI(mergedExtraction, rawProfile)
+  console.log(`\n🤖 Sending raw profile directly to AI for mapping...`)
+  console.log(`📄 Visible text length: ${rawProfile.visible_text?.length || 0} chars`)
+  
+  // Send raw text directly to AI for final mapping
+  const mappedProfile = await mapRawProfileDirectly(rawProfile)
+  
+  console.log(`\n✅ Final mapped profile:`)
+  console.log(`   - parsedExperience: ${mappedProfile.parsedExperience?.length || 0}`)
+  console.log(`   - parsedEducation: ${mappedProfile.parsedEducation?.length || 0}`)
+  console.log(`   - parsedSkills: ${mappedProfile.parsedSkills?.length || 0}`)
+  console.log(`   - languages: ${mappedProfile.languages?.length || 0}`)
 
   return normalizeMappedProfile(mappedProfile, rawProfile)
 }
 
-async function extractPartialChunkWithOpenAI(rawProfileChunk, totalChunks) {
+async function mapRawProfileDirectly(rawProfile) {
+  const fullText = rawProfile.visible_text || ""
+  
+  const systemPrompt = `You are a professional profile data extraction AI. Extract ALL information and map to schema.
+
+CRITICAL: When you see multiple entries (multiple jobs, multiple schools, multiple skills), you MUST extract ALL of them into arrays.
+
+EXAMPLE OF CORRECT EXTRACTION:
+If text contains:
+"Experience
+Founder and CEO
+NVIDIA
+1993 - Present · 33 yrs 5 mos
+
+Dishwasher, Busboy, Waiter
+Denny's · Seasonal
+1978 - 1983 · 5 yrs"
+
+You MUST return:
+"parsedExperience": [
+  {"company_name": "NVIDIA", "position": "Founder and CEO", "location": "", "service_period": "1993 - Present · 33 yrs 5 mos"},
+  {"company_name": "Denny's", "position": "Dishwasher, Busboy, Waiter", "location": "", "service_period": "1978 - 1983 · 5 yrs"}
+]
+
+If text contains:
+"Education
+Stanford University
+MSEE
+1990 – 1992
+
+Oregon State University
+BSEE
+1980 – 1984"
+
+You MUST return:
+"parsedEducation": [
+  {"institution": "Stanford University", "degree": "MSEE", "field": "", "graduationDate": "1990 – 1992"},
+  {"institution": "Oregon State University", "degree": "BSEE", "field": "", "graduationDate": "1980 – 1984"}
+]
+
+If text contains:
+"Skills
+Management
+Endorsed by 43 colleagues
+Leadership
+Communication"
+
+You MUST return:
+"parsedSkills": [
+  {"skill_name": "Management"},
+  {"skill_name": "Leadership"},
+  {"skill_name": "Communication"}
+]
+
+SCHEMA FIELDS:
+- firstName, lastName: From profile name
+- linkedInUrl: From source URL
+- title: Current job title
+- currentPosition: Same as title
+- location: Person's location
+- currentCompany: Current company name
+- bio: About section
+- profilePhotoUrl: From metadata
+- parsedExperience: ARRAY of ALL jobs
+- parsedEducation: ARRAY of ALL schools
+- parsedSkills: ARRAY of ALL skills
+- parsedCertificates: ARRAY of ALL certifications
+- languages: ARRAY of ALL languages
+- email, phone, skype, otherContact: Contact info
+- parsedSocialMedia: Social media URLs
+- yearsOfExperience: Number calculated from experience
+- source: "extension"
+- visibility: "private"
+- university, diploma, graduationDate: Most recent education
+- createdBy, companyId, salary, noticePeriod, nationality, birthdate, gender: Empty strings
+
+TEXT TO EXTRACT FROM:
+${fullText}
+
+Extract EVERY entry you find. Do not stop after one.`
+
   return requestOpenAIJson({
-    schemaName: "profile_scraper_partial_extraction",
-    schema: PARTIAL_EXTRACTION_SCHEMA,
-    systemText: [
-      "You are ProfileScraper AI, a STRICT partial extraction engine. Accuracy over completeness.",
-      "Extract ONLY explicit facts from this raw chunk. Do not create the final CRM schema.",
-      "Return partial facts only: profile_summary, contact_info, organization, skills, experience, education, certifications, languages, projects, links.",
-      "If a fact is not clearly present in this chunk, leave it empty. Do not infer, guess, summarize, or fill from outside knowledge.",
-      "Ignore navigation, buttons, ads, recommendations, engagement metrics, logged-in viewer data, unrelated profiles, and boilerplate.",
-      "Extract only facts about the main profile subject from source_url.",
-      "For phones, extract only tel links or explicit Phone/Mobile/Tel/Call labels.",
-      "This is one chunk from a larger page. Return only facts supported by this chunk."
-    ].join(" "),
+    schemaName: "recruiter_candidate_schema",
+    schema: PROFILE_JSON_SCHEMA,
+    systemText: systemPrompt,
     userPayload: {
-      instruction: "Extract partial profile facts from this chunk only. Do not map to the final schema yet.",
-      total_chunks: totalChunks,
-      raw_profile_chunk: rawProfileChunk
+      instruction: "Extract ALL data. Return arrays with ALL entries found.",
+      source_url: rawProfile.source_url || "",
+      profilePhotoUrl: rawProfile.candidate_image || rawProfile.meta?.image || ""
     }
   })
 }
 
+async function extractPartialChunkWithOpenAI(rawProfileChunk, totalChunks) {
+  // Extract the actual text content to send directly in the prompt
+  let fullText = ""
+  
+  if (rawProfileChunk.content_chunks) {
+    console.log(`🤖 Sending to AI: ${rawProfileChunk.content_chunks.length} content chunks`)
+    
+    rawProfileChunk.content_chunks.forEach((chunk, idx) => {
+      const length = chunk.text?.length || chunk.links?.length || 0
+      console.log(`  Chunk ${idx}: type=${chunk.type}, length=${length}`)
+      
+      if (chunk.text) {
+        fullText += `\n\n=== ${chunk.type.toUpperCase()} ===\n${chunk.text}`
+      }
+    })
+  }
+  
+  // Add visible_text if present
+  if (rawProfileChunk.visible_text) {
+    fullText += `\n\n=== FULL PAGE TEXT ===\n${rawProfileChunk.visible_text}`
+  }
+  
+  console.log(`\n📄 Total text being sent to AI: ${fullText.length} chars\n`)
+  
+  const systemPrompt = `You are ProfileScraper AI. Extract ALL profile data.
+
+CRITICAL: Extract EVERY SINGLE entry. Do NOT stop after one.
+
+EXPERIENCE - Extract ALL jobs:
+Format: {company_name, position, location, service_period}
+Look for: Company name + Job title + Date range
+Example: "NVIDIA" + "Founder and CEO" + "1993 - Present"
+Example: "Denny's" + "Dishwasher, Busboy, Waiter" + "1978 - 1983"
+
+EDUCATION - Extract ALL schools:
+Format: {institution, degree, field, graduationDate}
+Look for: School name + Degree + Years
+Example: "Stanford University" + "MSEE" + "1990 – 1992"
+Example: "Oregon State University" + "BSEE" + "1980 – 1984"
+
+SKILLS - Extract ALL skills:
+Look for: Technical skills, tools, frameworks, soft skills
+Example: "Management", "Leadership", "Python", "Java"
+
+LANGUAGES - Extract ALL languages:
+Example: "English", "Spanish", "Chinese"
+
+SCAN THE ENTIRE TEXT BELOW. Extract EVERYTHING.
+
+TEXT TO ANALYZE:
+${fullText}
+
+Return JSON with: profile_summary, contact_info, organization, skills, experience, education, certifications, languages, projects, links`
+
+  return requestOpenAIJson({
+    schemaName: "profile_scraper_partial_extraction",
+    schema: PARTIAL_EXTRACTION_SCHEMA,
+    systemText: systemPrompt,
+    userPayload: {
+      instruction: "Extract ALL entries from the text above. Do not skip any."
+    }
+  })
+}
+
+function hasOpenAiKey() {
+  return Boolean(String(process.env.OPENAI_API_KEY || "").trim())
+}
+
 async function mapMergedExtractionWithOpenAI(mergedExtraction, rawProfile) {
   return requestOpenAIJson({
-    schemaName: "profile_scraper_schema",
+    schemaName: "recruiter_candidate_schema",
     schema: PROFILE_JSON_SCHEMA,
     systemText: [
-      "You are ProfileScraper AI, a STRICT final schema mapping engine.",
-      "Map the merged extracted facts into the final CRM JSON schema.",
+      "You are RecruiterAI, a candidate profile mapper for recruiter CRM systems.",
+      "Map extracted profile facts into the RECRUITER CANDIDATE schema (firstName, lastName, title, parsedExperience, etc.).",
       "Use ONLY facts present in merged_extraction and raw_profile_summary. Do not use outside knowledge.",
-      "If a field is unknown, use an empty string or empty array.",
-      "Remove duplicates and keep the cleanest version of repeated skills, experience, education, certifications, projects, languages, and links.",
-      "Extract only the main profile subject from source_url, not adjacent people.",
-      "Do not invent emails, phone numbers, job titles, dates, schools, companies, or skills.",
-      "Return ONLY valid JSON with no markdown, explanations, or commentary."
+      "Field mapping rules:",
+      "  - firstName, lastName: From profile_summary.first_name, last_name (split if needed)",
+      "  - linkedInUrl: From source_url if LinkedIn, else empty",
+      "  - title: From profile_summary.headline or job_title",
+      "  - currentPosition: Same as title/current role when visible",
+      "  - location: From profile_summary.location",
+      "  - currentCompany: From organization.company_name (top of experience list if available)",
+      "  - bio: From profile_summary.bio",
+      "  - profilePhotoUrl: From profile_summary.profile_photo_url",
+      "  - parsedExperience: Array of {company_name, position, location, service_period} from experience items",
+      "  - parsedEducation: Array of {institution, degree, field, graduationDate} from education items",
+      "  - university, diploma, graduationDate: From the top education item",
+      "  - parsedSkills: Array of {skill_name} from skills (remove duplicates)",
+      "  - parsedCertificates: Array of {name, issuedDate, expiryDate} from certifications",
+      "  - languages: Array of language strings",
+      "  - email, phone, skype, otherContact: From contact_info (not from visible_text guessing)",
+      "  - parsedSocialMedia: {linkedin, twitter, github, facebook, instagram} URLs from contact_info or extracted links",
+      "  - yearsOfExperience: Computed as number from experience dates, or 0 if not determinable",
+      "  - source: Always 'extension'",
+      "  - visibility: Always 'private'",
+      "  - createdBy, companyId: Leave empty (recruiter fills later)",
+      "  - salary, noticePeriod, nationality, birthdate, gender: Leave empty unless explicitly visible",
+      "If a field has no data, use empty string, empty array, or 0 as appropriate.",
+      "Return ONLY valid JSON. No markdown, explanations, or commentary."
     ].join(" "),
     userPayload: {
-      instruction: "Create one final clean structured profile schema from these merged facts.",
+      instruction: "Map merged facts into the recruiter candidate schema. Extract data as-is, do not infer.",
       raw_profile_summary: createRawProfileSummary(rawProfile),
       merged_extraction: mergedExtraction
     }
@@ -117,7 +277,7 @@ async function mapMergedExtractionWithOpenAI(mergedExtraction, rawProfile) {
 }
 
 async function requestOpenAIJson({ schemaName, schema, systemText, userPayload }) {
-  const response = await fetch("https://api.openai.com/v1/responses", {
+  const response = await fetch("https://api.openai.com/v1/chat/completions", {
     method: "POST",
     headers: {
       Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
@@ -125,29 +285,20 @@ async function requestOpenAIJson({ schemaName, schema, systemText, userPayload }
     },
     body: JSON.stringify({
       model: OPENAI_MODEL,
-      input: [
+      temperature: 0.3,
+      messages: [
         {
           role: "system",
-          content: [
-            {
-              type: "input_text",
-              text: systemText
-            }
-          ]
+          content: systemText
         },
         {
           role: "user",
-          content: [
-            {
-              type: "input_text",
-              text: JSON.stringify(userPayload)
-            }
-          ]
+          content: JSON.stringify(userPayload)
         }
       ],
-      text: {
-        format: {
-          type: "json_schema",
+      response_format: {
+        type: "json_schema",
+        json_schema: {
           name: schemaName,
           strict: true,
           schema
@@ -159,98 +310,17 @@ async function requestOpenAIJson({ schemaName, schema, systemText, userPayload }
   const result = await response.json()
 
   if (!response.ok) {
+    console.error("OpenAI API Error:", result)
     throw new Error(result.error?.message || "OpenAI request failed")
   }
 
-  const outputText = result.output_text || extractOutputText(result)
+  const outputText = result.choices?.[0]?.message?.content
 
   if (!outputText) {
     throw new Error("OpenAI returned no JSON output")
   }
 
   return JSON.parse(outputText)
-}
-
-async function mapChunkWithOpenAI(rawProfileChunk, totalChunks) {
-  const response = await fetch("https://api.openai.com/v1/responses", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify({
-      model: OPENAI_MODEL,
-      input: [
-        {
-          role: "system",
-          content: [
-            {
-              type: "input_text",
-              text: [
-                "You are ProfileScraper AI, a STRICT data extraction engine. Accuracy over completeness.",
-                "Extract ONLY explicit, verifiable facts from raw profile data. Map into the CRM JSON schema.",
-                "Return ONLY valid JSON with no markdown, explanations, or commentary.",
-                "⚠️ CRITICAL RULES:",
-                "1. If data is not explicitly present, leave fields EMPTY. Do not guess, infer, or fill from context.",
-                "2. Use empty strings (\"\") for unknown text fields and empty arrays ([]) for unknown lists.",
-                "3. Ignore: navigation, buttons, ads, boilerplate, social proof, recommendations, engagement metrics.",
-                "4. Ignore: logged-in user data, account dropdowns, sidebar ads, unrelated profiles.",
-                "5. Extract ONLY the main profile subject from the source_url, not adjacent people.",
-                "6. For contact_info.email: Extract ONLY from explicit email addresses (mailto: links or common email domain patterns). Reject if ambiguous.",
-                "7. For contact_info.phone: Extract ONLY from tel: links or explicit labels (\"Phone:\", \"Mobile:\", \"Call:\"). Reject strings without clear context.",
-                "8. For personal_info.profile_photo_url: Use ONLY images clearly tagged as profile/avatar/person photos. Reject if ambiguous.",
-                "9. For skills/education/experience/projects: Extract ONLY if clearly labeled and describing the MAIN subject, not examples or references.",
-                "10. Remove exact duplicates within each array field.",
-                "CONTEXT: This may be one chunk of multiple. Return only facts from THIS chunk. Do not assume data from other chunks."
-              ].join(" ")
-            }
-          ]
-        },
-        {
-          role: "user",
-          content: [
-            {
-              type: "input_text",
-              text: JSON.stringify({
-                instruction: "Map this raw profile chunk into the schema. This may be one chunk from a larger page.",
-                total_chunks: totalChunks,
-                raw_profile_chunk: rawProfileChunk
-              })
-            }
-          ]
-        }
-      ],
-      text: {
-        format: {
-          type: "json_schema",
-          name: "profile_scraper_schema",
-          strict: true,
-          schema: PROFILE_JSON_SCHEMA
-        }
-      }
-    })
-  })
-
-  const result = await response.json()
-
-  if (!response.ok) {
-    throw new Error(result.error?.message || "OpenAI request failed")
-  }
-
-  const outputText = result.output_text || extractOutputText(result)
-
-  if (!outputText) {
-    throw new Error("OpenAI returned no JSON output")
-  }
-
-  return JSON.parse(outputText)
-}
-
-function extractOutputText(result) {
-  return result.output
-    ?.flatMap((item) => item.content || [])
-    ?.find((content) => content.type === "output_text")
-    ?.text
 }
 
 function createProfileMappingChunks(rawProfile) {
@@ -269,8 +339,13 @@ function createProfileMappingChunks(rawProfile) {
     education_sections: [],
     certification_sections: [],
     projects_sections: [],
+    languages_sections: [],
     contact_links: [],
     social_links: [],
+    structured_data: {},
+    local_extraction: {},
+    confidence: {},
+    distilled_text: "",
     expanded_pages: [],
     visible_text: "",
     content_chunks: []
@@ -291,10 +366,11 @@ function createProfileMappingChunks(rawProfile) {
     ...createTextPieces("education_section", compactProfile.education_sections || []),
     ...createTextPieces("certification_section", compactProfile.certification_sections || []),
     ...createTextPieces("projects_section", compactProfile.projects_sections || []),
+    ...createTextPieces("languages_section", compactProfile.languages_sections || []),
     ...createTextPieces("section", compactProfile.sections || []),
     ...createExpandedPagePieces(compactProfile.expanded_pages || []),
-    ...splitText(compactProfile.visible_text || "", CHUNK_CHAR_LIMIT).map((text, index) => ({
-      type: "visible_text",
+    ...splitText(compactProfile.distilled_text || compactProfile.visible_text || "", CHUNK_CHAR_LIMIT).map((text, index) => ({
+      type: compactProfile.distilled_text ? "distilled_text" : "visible_text",
       index,
       text
     }))
@@ -348,6 +424,7 @@ function compactRawProfile(rawProfile) {
     extracted_at: rawProfile.extracted_at || new Date().toISOString(),
     page_title: rawProfile.page_title || "",
     meta: rawProfile.meta || {},
+    structured_data: rawProfile.structured_data || {},
     candidate_name: rawProfile.candidate_name || "",
     candidate_description: rawProfile.candidate_description || "",
     candidate_image: rawProfile.candidate_image || "",
@@ -362,8 +439,12 @@ function compactRawProfile(rawProfile) {
     education_sections: uniqueStrings(rawProfile.education_sections || []),
     certification_sections: uniqueStrings(rawProfile.certification_sections || []),
     projects_sections: uniqueStrings(rawProfile.projects_sections || []),
+    languages_sections: uniqueStrings(rawProfile.languages_sections || []),
     contact_links: dedupeLinks(rawProfile.contact_links || []),
     social_links: dedupeLinks(rawProfile.social_links || []),
+    local_extraction: rawProfile.local_extraction || {},
+    confidence: rawProfile.confidence || {},
+    distilled_text: rawProfile.distilled_text || "",
     expanded_pages: rawProfile.expanded_pages || [],
     visible_text: rawProfile.visible_text || ""
   }
@@ -581,6 +662,7 @@ function createRawProfileSummary(rawProfile) {
     extracted_at: rawProfile.extracted_at || new Date().toISOString(),
     page_title: rawProfile.page_title || "",
     meta: rawProfile.meta || {},
+    structured_data: rawProfile.structured_data || {},
     candidate_name: rawProfile.candidate_name || "",
     candidate_description: rawProfile.candidate_description || "",
     candidate_image: rawProfile.candidate_image || "",
@@ -588,7 +670,9 @@ function createRawProfileSummary(rawProfile) {
     emails: rawProfile.emails || [],
     phones: rawProfile.phones || [],
     contact_links: rawProfile.contact_links || [],
-    social_links: rawProfile.social_links || []
+    social_links: rawProfile.social_links || [],
+    local_extraction: rawProfile.local_extraction || {},
+    confidence: rawProfile.confidence || {}
   }
 }
 
@@ -619,9 +703,445 @@ function normalizeMappedProfile(profile, rawProfile) {
     projects: dedupeObjects(profile.projects || [], projectKey)
   }
 
+  applyRecruiterFields(normalizedProfile, profile, rawProfile)
+  applyVisibleTextMappings(normalizedProfile, rawProfile)
+  normalizedProfile.contact_info.website = sanitizeWebsiteUrl(normalizedProfile.contact_info.website)
   normalizedProfile.contact_info.phone = rawProfile.phones?.[0] || ""
 
-  return normalizedProfile
+  return createCandidateSchemaProfile(normalizedProfile, rawProfile)
+}
+
+function createCandidateSchemaProfile(profile, rawProfile) {
+  const personalInfo = profile.personal_info || {}
+  const contactInfo = profile.contact_info || {}
+  const socialMedia = profile.parsedSocialMedia || {}
+  const firstName = profile.firstName || personalInfo.first_name || ""
+  const lastName = profile.lastName || personalInfo.last_name || ""
+  const linkedInUrl = profile.linkedInUrl || contactInfo.linkedin || findLink(rawProfile.links, "linkedin.com") ||
+    (rawProfile.source_host === "linkedin.com" ? rawProfile.source_url : "")
+  const parsedExperience = profile.parsedExperience || profile.experience || []
+  const parsedEducation = profile.parsedEducation || profile.education || []
+  const skills = profile.parsedSkills?.length
+    ? profile.parsedSkills
+    : uniqueStrings(profile.skills || []).map((skill) => ({ skill_name: skill }))
+  const parsedCertificates = profile.parsedCertificates || profile.certifications || []
+  const title = profile.title || personalInfo.job_title || personalInfo.headline || ""
+  const topEducation = parsedEducation[0] || {}
+
+  return {
+    firstName,
+    lastName,
+    linkedInUrl,
+    title,
+    currentPosition: profile.currentPosition || title,
+    location: profile.location || personalInfo.location || "",
+    currentCompany: profile.currentCompany || profile.organization?.company_name || parsedExperience[0]?.company_name || "",
+    bio: profile.bio || personalInfo.bio || "",
+    profilePhotoUrl: profile.profilePhotoUrl || personalInfo.profile_photo_url || "",
+    parsedExperience,
+    parsedEducation,
+    university: profile.university || topEducation.institution || "",
+    diploma: profile.diploma || topEducation.degree || "",
+    graduationDate: profile.graduationDate || topEducation.graduationDate || "",
+    parsedSkills: skills,
+    parsedCertificates,
+    languages: uniqueStrings(profile.languages || []),
+    email: profile.email || contactInfo.email || rawProfile.emails?.[0] || "",
+    phone: rawProfile.phones?.[0] || profile.phone || contactInfo.phone || "",
+    skype: profile.skype || "",
+    otherContact: profile.otherContact || "",
+    parsedSocialMedia: {
+      linkedin: linkedInUrl || socialMedia.linkedin || "",
+      twitter: socialMedia.twitter || contactInfo.twitter || "",
+      github: socialMedia.github || contactInfo.github || "",
+      facebook: socialMedia.facebook || "",
+      instagram: socialMedia.instagram || ""
+    },
+    yearsOfExperience: calculateYearsOfExperience(parsedExperience, profile.yearsOfExperience),
+    source: "extension",
+    visibility: profile.visibility || "private",
+    createdBy: profile.createdBy || "",
+    companyId: profile.companyId || "",
+    salary: profile.salary || "",
+    noticePeriod: profile.noticePeriod || "",
+    nationality: profile.nationality || "",
+    birthdate: profile.birthdate || "",
+    gender: profile.gender || ""
+  }
+}
+
+function applyRecruiterFields(normalizedProfile, profile, rawProfile) {
+  const firstName = profile.firstName || normalizedProfile.personal_info.first_name
+  const lastName = profile.lastName || normalizedProfile.personal_info.last_name
+  const fullName = [firstName, lastName].filter(Boolean).join(" ")
+  const socialMedia = profile.parsedSocialMedia || {}
+
+  normalizedProfile.personal_info.first_name = firstName
+  normalizedProfile.personal_info.last_name = lastName
+  normalizedProfile.personal_info.full_name = normalizedProfile.personal_info.full_name || fullName
+  normalizedProfile.personal_info.headline = profile.title || normalizedProfile.personal_info.headline
+  normalizedProfile.personal_info.job_title = profile.title || normalizedProfile.personal_info.job_title
+  normalizedProfile.personal_info.bio = profile.bio || normalizedProfile.personal_info.bio
+  normalizedProfile.personal_info.location = profile.location || normalizedProfile.personal_info.location
+  normalizedProfile.personal_info.profile_photo_url = profile.profilePhotoUrl || normalizedProfile.personal_info.profile_photo_url
+
+  normalizedProfile.contact_info.email = profile.email || normalizedProfile.contact_info.email
+  normalizedProfile.contact_info.website = normalizedProfile.contact_info.website || findWebsite(rawProfile.links, rawProfile.source_host)
+  normalizedProfile.contact_info.linkedin = profile.linkedInUrl || socialMedia.linkedin || normalizedProfile.contact_info.linkedin
+  normalizedProfile.contact_info.github = socialMedia.github || normalizedProfile.contact_info.github
+  normalizedProfile.contact_info.twitter = socialMedia.twitter || normalizedProfile.contact_info.twitter
+
+  normalizedProfile.organization.company_name = profile.currentCompany || normalizedProfile.organization.company_name
+
+  if (profile.parsedSkills?.length) {
+    normalizedProfile.skills = uniqueStrings(profile.parsedSkills.map((skill) => skill.skill_name || skill))
+  }
+
+  if (profile.parsedExperience?.length) {
+    normalizedProfile.experience = profile.parsedExperience
+  }
+
+  if (profile.parsedEducation?.length) {
+    normalizedProfile.education = profile.parsedEducation
+  }
+
+  if (profile.parsedCertificates?.length) {
+    normalizedProfile.certifications = profile.parsedCertificates
+  }
+}
+
+function applyVisibleTextMappings(profile, rawProfile) {
+  // DISABLED: Let AI handle all extraction, don't override with backend parsing
+  // The backend parser was interfering with AI results
+  
+  if (!profile.organization.company_name && profile.experience[0]?.company_name) {
+    profile.organization.company_name = profile.experience[0].company_name
+  }
+
+  if (!profile.currentCompany && profile.organization.company_name) {
+    profile.currentCompany = profile.organization.company_name
+  }
+
+  profile.parsedExperience = profile.experience
+  profile.parsedEducation = profile.education
+  profile.parsedSkills = profile.skills.map((skill) => ({ skill_name: skill }))
+  profile.parsedCertificates = profile.certifications || []
+  profile.yearsOfExperience = calculateYearsOfExperience(profile.experience, profile.yearsOfExperience)
+}
+
+function extractProfileFactsFromText(text) {
+  const lines = String(text || "")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+
+  return {
+    experience: parseExperienceSection(getBestSectionLines(lines, "Experience", [
+      "Education",
+      "Skills",
+      "Licenses & certifications",
+      "Certifications",
+      "Projects",
+      "Activity",
+      "Featured"
+    ], scoreExperienceSection)),
+    education: parseEducationSection(getBestSectionLines(lines, "Education", [
+      "Skills",
+      "Licenses & certifications",
+      "Certifications",
+      "Projects",
+      "Activity",
+      "Featured",
+      "Experience"
+    ], scoreEducationSection)),
+    skills: parseSkillsSection(getBestSectionLines(lines, "Skills", [
+      "Licenses & certifications",
+      "Certifications",
+      "Projects",
+      "Activity",
+      "Featured",
+      "Experience",
+      "Education"
+    ], scoreSkillsSection))
+  }
+}
+
+function createVisibleMappingText(rawProfile) {
+  return [
+    rawProfile.visible_text,
+    ...(rawProfile.experience_sections || []),
+    ...(rawProfile.education_sections || []),
+    ...(rawProfile.skills_sections || []),
+    ...(rawProfile.languages_sections || [])
+  ].filter(Boolean).join("\n")
+}
+
+function mergeExperienceItems(primaryItems, fallbackItems) {
+  const merged = [...primaryItems]
+
+  for (const fallback of fallbackItems) {
+    const existing = merged.find((item) =>
+      normalizeKey(item.company_name || item.company) === normalizeKey(fallback.company_name) &&
+      normalizeKey(item.position || item.role) === normalizeKey(fallback.position)
+    )
+
+    if (existing) {
+      existing.company_name = existing.company_name || fallback.company_name
+      existing.position = existing.position || fallback.position
+      existing.location = existing.location || fallback.location
+      existing.service_period = existing.service_period || fallback.service_period
+    } else {
+      merged.push(fallback)
+    }
+  }
+
+  return dedupeObjects(merged, experienceKey)
+}
+
+function mergeEducationItems(primaryItems, fallbackItems) {
+  const merged = [...primaryItems]
+
+  for (const fallback of fallbackItems) {
+    const existing = merged.find((item) =>
+      normalizeKey(item.institution) === normalizeKey(fallback.institution)
+    )
+
+    if (existing) {
+      existing.degree = existing.degree || fallback.degree
+      existing.field = existing.field || fallback.field
+      existing.graduationDate = existing.graduationDate || fallback.graduationDate
+    } else {
+      merged.push(fallback)
+    }
+  }
+
+  return dedupeObjects(merged, educationKey)
+}
+
+function getBestSectionLines(lines, startLabel, endLabels, scoreSection) {
+  const startIndexes = lines
+    .map((line, index) => normalizeKey(line) === normalizeKey(startLabel) ? index : -1)
+    .filter((index) => index >= 0)
+
+  if (startIndexes.length === 0) {
+    return []
+  }
+
+  return startIndexes
+    .map((startIndex) => getSectionLinesFromIndex(lines, startIndex, endLabels))
+    .sort((a, b) => scoreSection(b) - scoreSection(a))[0] || []
+}
+
+function getSectionLinesFromIndex(lines, startIndex, endLabels) {
+  const endKeys = endLabels.map(normalizeKey)
+  const endIndex = lines.findIndex((line, index) =>
+    index > startIndex && endKeys.includes(normalizeKey(line))
+  )
+
+  return lines
+    .slice(startIndex + 1, endIndex === -1 ? lines.length : endIndex)
+    .filter(isUsefulProfileLine)
+}
+
+function scoreExperienceSection(lines) {
+  return lines.filter(isServicePeriod).length * 10 + lines.length
+}
+
+function scoreEducationSection(lines) {
+  return lines.filter(isEducationPeriod).length * 10 + lines.length
+}
+
+function scoreSkillsSection(lines) {
+  return parseSkillsSection(lines).length * 10 + lines.length
+}
+
+function parseExperienceSection(lines) {
+  const experiences = []
+
+  for (let i = 0; i < lines.length; i++) {
+    if (!isServicePeriod(lines[i])) {
+      continue
+    }
+
+    const position = stripProfileAssetSuffix(lines[i - 2] || "")
+    const company = cleanCompanyName(lines[i - 1] || "")
+
+    if (!position || !company || isNoiseProfileLine(position) || isNoiseProfileLine(company)) {
+      continue
+    }
+
+    experiences.push({
+      company_name: company,
+      position,
+      location: "",
+      service_period: lines[i]
+    })
+  }
+
+  return dedupeObjects(experiences, experienceKey)
+}
+
+function parseEducationSection(lines) {
+  const education = []
+
+  for (let i = 0; i < lines.length; i++) {
+    if (!isEducationPeriod(lines[i])) {
+      continue
+    }
+
+    const degree = stripProfileAssetSuffix(lines[i - 1] || "")
+    const institution = stripProfileAssetSuffix(lines[i - 2] || "")
+
+    if (!institution || isNoiseProfileLine(institution)) {
+      continue
+    }
+
+    education.push({
+      institution,
+      degree: isNoiseProfileLine(degree) ? "" : degree,
+      field: "",
+      graduationDate: lines[i]
+    })
+  }
+
+  return dedupeObjects(education, educationKey)
+}
+
+function parseSkillsSection(lines) {
+  return uniqueStrings(lines.filter((line) =>
+    line.length <= 80 &&
+    !isNoiseProfileLine(line) &&
+    !/endorsement|endorsed|colleague/i.test(line) &&
+    !/^\d+\s+endorsements?$/i.test(line)
+  )).slice(0, 50)
+}
+
+function isServicePeriod(line) {
+  return /\b(?:19|20)\d{2}\b/.test(line) &&
+    (/(?:-|\u2013|\u2014)/.test(line) || /\b(?:present|yr|yrs|mo|mos)\b/i.test(line))
+}
+
+function isEducationPeriod(line) {
+  return /\b(?:19|20)\d{2}\b/.test(line) && /(?:-|\u2013|\u2014)/.test(line)
+}
+
+function isUsefulProfileLine(line) {
+  return !isNoiseProfileLine(line) && !/\blogo$/i.test(line) && !/^thumbnail\b/i.test(line)
+}
+
+function isNoiseProfileLine(line) {
+  return /^(follow|message|contact info|show all|view|like|comment|repost|send|more|posts|videos)$/i.test(line) ||
+    /^view\s+/i.test(line) ||
+    /reactions|comments|reposts|followers/i.test(line)
+}
+
+function cleanCompanyName(value) {
+  return stripProfileAssetSuffix(String(value || "").split(/\u00b7|\u00c2\u00b7/)[0]).trim()
+}
+
+function stripProfileAssetSuffix(value) {
+  return String(value || "").replace(/\s+logo$/i, "").trim()
+}
+
+function calculateYearsOfExperience(experienceItems, currentValue = 0) {
+  const explicitYears = experienceItems
+    .map((item) => extractYearsFromPeriod(item.service_period || item.duration || ""))
+    .filter((years) => years > 0)
+
+  if (explicitYears.length > 0) {
+    return Math.max(...explicitYears)
+  }
+
+  return Number(currentValue) || 0
+}
+
+function extractYearsFromPeriod(period) {
+  const text = String(period || "")
+  const explicitYearMatch = text.match(/(\d+(?:\.\d+)?)\s*yrs?/i)
+
+  if (explicitYearMatch) {
+    return Number(explicitYearMatch[1])
+  }
+
+  const startYearMatch = text.match(/\b((?:19|20)\d{2})\b/)
+
+  if (!startYearMatch || !/present/i.test(text)) {
+    return 0
+  }
+
+  return Math.max(0, new Date().getFullYear() - Number(startYearMatch[1]))
+}
+
+function sanitizeWebsiteUrl(url) {
+  if (!url) {
+    return ""
+  }
+
+  try {
+    const host = new URL(url).hostname.replace(/^www\./, "")
+
+    if (isSocialOrNavigationHost(host) || isNavigationUrl(url)) {
+      return ""
+    }
+
+    return url
+  } catch {
+    return ""
+  }
+}
+
+function isHighConfidenceLocalProfile(rawProfile) {
+  const confidence = rawProfile.confidence || {}
+  const local = rawProfile.local_extraction || {}
+
+  return confidence.level === "high" &&
+    confidence.score >= 70 &&
+    Boolean(local.full_name) &&
+    (local.experience_sections?.length > 0 || local.education_sections?.length > 0 || local.skills?.length > 0)
+}
+
+function mapLocalExtraction(rawProfile) {
+  const local = rawProfile.local_extraction || {}
+  const fullName = cleanName(local.full_name || rawProfile.candidate_name || rawProfile.page_title || "")
+  const { firstName, lastName } = splitName(fullName)
+
+  return {
+    profile_id: createProfileId(rawProfile.source_url || fullName),
+    source_platform: rawProfile.source_platform || "",
+    source_url: rawProfile.source_url || "",
+    extracted_at: rawProfile.extracted_at || new Date().toISOString(),
+    personal_info: {
+      first_name: local.first_name || firstName,
+      last_name: local.last_name || lastName,
+      full_name: fullName,
+      headline: local.headline || "",
+      job_title: "",
+      bio: rawProfile.candidate_description || rawProfile.meta?.description || "",
+      location: local.location || "",
+      profile_photo_url: local.profile_photo_url || rawProfile.candidate_image || rawProfile.meta?.image || ""
+    },
+    contact_info: {
+      email: local.email || rawProfile.emails?.[0] || "",
+      phone: rawProfile.phones?.[0] || "",
+      website: local.website || findWebsite(rawProfile.links, rawProfile.source_host),
+      linkedin: local.linkedin || findLink(rawProfile.links, "linkedin.com"),
+      github: local.github || findLink(rawProfile.links, "github.com"),
+      twitter: local.twitter || findLink(rawProfile.links, "twitter.com") || findLink(rawProfile.links, "x.com")
+    },
+    organization: {
+      company_name: "",
+      company_website: "",
+      industry: "",
+      company_size: "",
+      company_location: ""
+    },
+    skills: uniqueStrings(local.skills || []),
+    experience: [],
+    education: [],
+    certifications: [],
+    languages: [],
+    projects: []
+  }
 }
 
 function createEmptyProfile(rawProfile = {}) {
@@ -745,9 +1265,9 @@ function dedupeObjects(values, keyFn) {
 
 function experienceKey(item) {
   return [
-    item.company,
-    item.role,
-    item.start_date,
+    item.company_name || item.company,
+    item.position || item.role,
+    item.service_period || item.start_date,
     item.end_date
   ].join("|")
 }
@@ -756,8 +1276,8 @@ function educationKey(item) {
   return [
     item.institution,
     item.degree,
-    item.field_of_study,
-    item.start_year,
+    item.field || item.field_of_study,
+    item.graduationDate || item.start_year,
     item.end_year
   ].join("|")
 }
@@ -785,49 +1305,7 @@ function normalizeKey(value) {
 }
 
 function mapWithoutAi(rawProfile) {
-  const fullName = cleanName(rawProfile.candidate_name || rawProfile.page_title || "")
-  const { firstName, lastName } = splitName(fullName)
-  const linkedin = findLink(rawProfile.links, "linkedin.com")
-  const github = findLink(rawProfile.links, "github.com")
-  const twitter = findLink(rawProfile.links, "twitter.com") || findLink(rawProfile.links, "x.com")
-
-  return {
-    profile_id: createProfileId(rawProfile.source_url || fullName),
-    source_platform: rawProfile.source_platform || "",
-    source_url: rawProfile.source_url || "",
-    extracted_at: rawProfile.extracted_at || new Date().toISOString(),
-    personal_info: {
-      first_name: firstName,
-      last_name: lastName,
-      full_name: fullName,
-      headline: "",
-      job_title: "",
-      bio: rawProfile.candidate_description || rawProfile.meta?.description || "",
-      location: "",
-      profile_photo_url: rawProfile.candidate_image || rawProfile.meta?.image || ""
-    },
-    contact_info: {
-      email: rawProfile.emails?.[0] || "",
-      phone: rawProfile.phones?.[0] || "",
-      website: findWebsite(rawProfile.links, rawProfile.source_host),
-      linkedin,
-      github,
-      twitter
-    },
-    organization: {
-      company_name: "",
-      company_website: "",
-      industry: "",
-      company_size: "",
-      company_location: ""
-    },
-    skills: [],
-    experience: [],
-    education: [],
-    certifications: [],
-    languages: [],
-    projects: []
-  }
+  return normalizeMappedProfile(mapLocalExtraction(rawProfile), rawProfile)
 }
 
 function cleanName(name) {
@@ -862,98 +1340,91 @@ function findWebsite(links = [], sourceHost = "") {
   return links.find((link) => {
     try {
       const host = new URL(link.href).hostname
-      return sourceHost && host !== sourceHost
+      const normalizedHost = host.replace(/^www\./, "")
+
+      return sourceHost &&
+        normalizedHost !== sourceHost &&
+        !isSocialOrNavigationHost(normalizedHost) &&
+        !isNavigationUrl(link.href)
     } catch {
       return false
     }
   })?.href || ""
 }
 
+function isSocialOrNavigationHost(host) {
+  return /linkedin\.com|facebook\.com|instagram\.com|twitter\.com|x\.com|github\.com/.test(host)
+}
+
+function isNavigationUrl(url) {
+  return /\/(?:mynetwork|feed|jobs|messaging|notifications|search|premium)(?:\/|$)/i.test(url)
+}
+
 const experienceItemSchema = {
   type: "object",
   additionalProperties: false,
-  required: [
-    "company",
-    "role",
-    "employment_type",
-    "location",
-    "start_date",
-    "end_date",
-    "duration",
-    "description",
-    "technologies"
-  ],
+  required: ["company_name", "position", "location", "service_period"],
   properties: {
-    company: { type: "string" },
-    role: { type: "string" },
-    employment_type: { type: "string" },
+    company_name: { type: "string" },
+    position: { type: "string" },
     location: { type: "string" },
-    start_date: { type: "string" },
-    end_date: { type: "string" },
-    duration: { type: "string" },
-    description: { type: "string" },
-    technologies: {
-      type: "array",
-      items: { type: "string" }
-    }
+    service_period: { type: "string" }
   }
 }
 
 const educationItemSchema = {
   type: "object",
   additionalProperties: false,
-  required: [
-    "institution",
-    "degree",
-    "field_of_study",
-    "start_year",
-    "end_year",
-    "grade"
-  ],
+  required: ["institution", "degree", "field", "graduationDate"],
   properties: {
     institution: { type: "string" },
     degree: { type: "string" },
-    field_of_study: { type: "string" },
-    start_year: { type: "string" },
-    end_year: { type: "string" },
-    grade: { type: "string" }
+    field: { type: "string" },
+    graduationDate: { type: "string" }
   }
 }
 
 const certificationItemSchema = {
   type: "object",
   additionalProperties: false,
-  required: [
-    "name",
-    "issue_date",
-    "expiry_date",
-    "credential_id"
-  ],
+  required: ["name", "issuedDate", "expiryDate"],
   properties: {
     name: { type: "string" },
-    issue_date: { type: "string" },
-    expiry_date: { type: "string" },
-    credential_id: { type: "string" }
+    issuedDate: { type: "string" },
+    expiryDate: { type: "string" }
+  }
+}
+
+const skillItemSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["skill_name"],
+  properties: {
+    skill_name: { type: "string" }
   }
 }
 
 const projectItemSchema = {
   type: "object",
   additionalProperties: false,
-  required: [
-    "project_name",
-    "description",
-    "technologies",
-    "project_url"
-  ],
+  required: ["project_name", "description", "project_url"],
   properties: {
     project_name: { type: "string" },
     description: { type: "string" },
-    technologies: {
-      type: "array",
-      items: { type: "string" }
-    },
     project_url: { type: "string" }
+  }
+}
+
+const socialMediaSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["linkedin", "twitter", "github", "facebook", "instagram"],
+  properties: {
+    linkedin: { type: "string" },
+    twitter: { type: "string" },
+    github: { type: "string" },
+    facebook: { type: "string" },
+    instagram: { type: "string" }
   }
 }
 
@@ -1089,100 +1560,65 @@ const PROFILE_JSON_SCHEMA = {
   type: "object",
   additionalProperties: false,
   required: [
-    "profile_id",
-    "source_platform",
-    "source_url",
-    "extracted_at",
-    "personal_info",
-    "contact_info",
-    "organization",
-    "skills",
-    "experience",
-    "education",
-    "certifications",
+    "firstName",
+    "lastName",
+    "linkedInUrl",
+    "title",
+    "currentPosition",
+    "location",
+    "currentCompany",
+    "bio",
+    "profilePhotoUrl",
+    "parsedExperience",
+    "parsedEducation",
+    "university",
+    "diploma",
+    "graduationDate",
+    "parsedSkills",
+    "parsedCertificates",
     "languages",
-    "projects"
+    "email",
+    "phone",
+    "skype",
+    "otherContact",
+    "parsedSocialMedia",
+    "yearsOfExperience",
+    "source",
+    "visibility",
+    "createdBy",
+    "companyId",
+    "salary",
+    "noticePeriod",
+    "nationality",
+    "birthdate",
+    "gender"
   ],
   properties: {
-    profile_id: { type: "string" },
-    source_platform: { type: "string" },
-    source_url: { type: "string" },
-    extracted_at: { type: "string" },
-    personal_info: {
-      type: "object",
-      additionalProperties: false,
-      required: [
-        "first_name",
-        "last_name",
-        "full_name",
-        "headline",
-        "job_title",
-        "bio",
-        "location",
-        "profile_photo_url"
-      ],
-      properties: {
-        first_name: { type: "string" },
-        last_name: { type: "string" },
-        full_name: { type: "string" },
-        headline: { type: "string" },
-        job_title: { type: "string" },
-        bio: { type: "string" },
-        location: { type: "string" },
-        profile_photo_url: { type: "string" }
-      }
-    },
-    contact_info: {
-      type: "object",
-      additionalProperties: false,
-      required: [
-        "email",
-        "phone",
-        "website",
-        "linkedin",
-        "github",
-        "twitter"
-      ],
-      properties: {
-        email: { type: "string" },
-        phone: { type: "string" },
-        website: { type: "string" },
-        linkedin: { type: "string" },
-        github: { type: "string" },
-        twitter: { type: "string" }
-      }
-    },
-    organization: {
-      type: "object",
-      additionalProperties: false,
-      required: [
-        "company_name",
-        "company_website",
-        "industry",
-        "company_size",
-        "company_location"
-      ],
-      properties: {
-        company_name: { type: "string" },
-        company_website: { type: "string" },
-        industry: { type: "string" },
-        company_size: { type: "string" },
-        company_location: { type: "string" }
-      }
-    },
-    skills: {
-      type: "array",
-      items: { type: "string" }
-    },
-    experience: {
+    firstName: { type: "string" },
+    lastName: { type: "string" },
+    linkedInUrl: { type: "string" },
+    title: { type: "string" },
+    currentPosition: { type: "string" },
+    location: { type: "string" },
+    currentCompany: { type: "string" },
+    bio: { type: "string" },
+    profilePhotoUrl: { type: "string" },
+    parsedExperience: {
       type: "array",
       items: experienceItemSchema
     },
-    education: {
+    parsedEducation: {
       type: "array",
       items: educationItemSchema
     },
-    certifications: {
+    university: { type: "string" },
+    diploma: { type: "string" },
+    graduationDate: { type: "string" },
+    parsedSkills: {
+      type: "array",
+      items: skillItemSchema
+    },
+    parsedCertificates: {
       type: "array",
       items: certificationItemSchema
     },
@@ -1190,13 +1626,25 @@ const PROFILE_JSON_SCHEMA = {
       type: "array",
       items: { type: "string" }
     },
-    projects: {
-      type: "array",
-      items: projectItemSchema
-    }
+    email: { type: "string" },
+    phone: { type: "string" },
+    skype: { type: "string" },
+    otherContact: { type: "string" },
+    parsedSocialMedia: socialMediaSchema,
+    yearsOfExperience: { type: "number" },
+    source: { type: "string" },
+    visibility: { type: "string" },
+    createdBy: { type: "string" },
+    companyId: { type: "string" },
+    salary: { type: "string" },
+    noticePeriod: { type: "string" },
+    nationality: { type: "string" },
+    birthdate: { type: "string" },
+    gender: { type: "string" }
   }
 }
 
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`)
 })
+

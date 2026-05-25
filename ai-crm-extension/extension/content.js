@@ -47,27 +47,11 @@ if (!window.profileScraperContentLoaded) {
 // ─────────────────────────────────────────────
 
 async function preparePageForScraping() {
-  // Phase 1: scroll to trigger lazy loading
+  // Scroll to trigger lazy-loading
   await scrollForLazyContent()
+  // Return to top for extraction
   window.scrollTo({ top: 0, behavior: "instant" })
-  await wait(300)
-
-  // Phase 2: click all expandable buttons
-  const clickCount = await clickAllExpandableButtons()
-
-  if (clickCount > 0) {
-    // Wait longer — LinkedIn does network requests after button clicks
-    await waitForExpandedContent()
-    await wait(500)
-  }
-
-  // Phase 3: scroll again to load any newly revealed content
-  await scrollForLazyContent()
-  await wait(400)
-
-  // Phase 4: back to top for extraction
-  window.scrollTo({ top: 0, behavior: "instant" })
-  await wait(200)
+  await wait(250)
 }
 
 // ─────────────────────────────────────────────
@@ -97,140 +81,48 @@ async function scrollForLazyContent() {
 }
 
 // ─────────────────────────────────────────────
-// CLICK EXPANDABLE BUTTONS
-// ─────────────────────────────────────────────
-
-async function clickAllExpandableButtons() {
-  // What we WANT to click
-  const safePatterns = [
-    /show\s*all/i,       // "Show all 12 skills"
-    /see\s*all/i,        // "See all experiences"
-    /show\s*more/i,      // "Show more"
-    /see\s*more/i,       // "See more"
-    /view\s*more/i,      // "View more"
-    /load\s*more/i,      // "Load more"
-    /expand/i,           // "Expand"
-    /read\s*more/i,      // "Read more"
-    /^more$/i            // Just "more"
-  ]
-
-  // What we NEVER click — social / destructive actions
-  const dangerousPatterns = [
-    /follow/i, /connect/i, /message/i, /like/i,
-    /share/i,  /apply/i,   /submit/i,  /join/i,
-    /subscribe/i, /sign\s*in/i, /log\s*in/i,
-    /login/i, /register/i, /next/i, /accept/i,
-    /reject/i, /buy/i, /download/i,
-    /comment/i,  /repost/i, /invite/i,
-    /save/i, /send/i, /post/i, /delete/i,
-    /react/i, /emoji/i, /report/i, /block/i,
-    /dismiss/i, /close/i, /cancel/i
-  ]
-
-  function getButtonText(el) {
-    return (
-      el.innerText?.trim() ||
-      el.getAttribute("aria-label")?.trim() ||
-      el.getAttribute("title")?.trim() ||
-      ""
-    )
-  }
-
-  function isSafe(el) {
-    const text = getButtonText(el).toLowerCase()
-    if (!text) return false
-    const safe      = safePatterns.some(p => p.test(text))
-    const dangerous = dangerousPatterns.some(p => p.test(text))
-    return safe && !dangerous && isVisible(el)
-  }
-
-  // ── Collect safe buttons ──
-  const candidates = [
-    ...document.querySelectorAll("button"),
-    ...document.querySelectorAll("a[href]"),
-    ...document.querySelectorAll("[role='button']"),
-    ...document.querySelectorAll("[aria-expanded='false']")
-  ]
-
-  const toClick = []
-  const seen    = new Set()
-
-  for (const el of candidates) {
-    if (!seen.has(el) && isSafe(el)) {
-      seen.add(el)
-      toClick.push(el)
-    }
-  }
-
-  // ── Click each one with real mouse events ──
-  // Raw .click() is blocked by LinkedIn's React event system
-  // dispatchEvent with MouseEvent bypasses that
-  let clicked = 0
-
-  for (const el of toClick) {
-    try {
-      el.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true }))
-      el.dispatchEvent(new MouseEvent("mouseup",   { bubbles: true, cancelable: true }))
-      el.dispatchEvent(new MouseEvent("click",     { bubbles: true, cancelable: true }))
-      clicked++
-      await wait(200) // small gap so LinkedIn doesn't ignore rapid clicks
-    } catch (err) {
-      // Ignore failed expansion clicks so scraping can continue.
-    }
-  }
-
-  return clicked
-}
-
-// ─────────────────────────────────────────────
-// WAIT FOR EXPANDED CONTENT TO SETTLE
-// ─────────────────────────────────────────────
-
-async function waitForExpandedContent() {
-  const maxWait       = 5000  // increased — LinkedIn does network calls
-  const settleDuration = 800  // increased — wait longer for content to stop changing
-  let lastMutationTime = Date.now()
-  let mutationCount    = 0
-
-  return new Promise((resolve) => {
-    const timeout = setTimeout(() => {
-      observer.disconnect()
-      resolve(false)
-    }, maxWait)
-
-    const observer = new MutationObserver(() => {
-      mutationCount++
-      lastMutationTime = Date.now()
-    })
-
-    observer.observe(document.body, {
-      childList:     true,
-      subtree:       true,
-      attributes:    false,
-      characterData: false
-    })
-
-    const checkSettled = setInterval(() => {
-      if (Date.now() - lastMutationTime >= settleDuration) {
-        clearInterval(checkSettled)
-        clearTimeout(timeout)
-        observer.disconnect()
-        resolve(true)
-      }
-    }, 100)
-  })
-}
-
-// ─────────────────────────────────────────────
 // BUILD RAW PROFILE
 // ─────────────────────────────────────────────
 
 async function buildRawProfile() {
   const sourceUrl      = window.location.href
   const sourceHost     = window.location.hostname.replace(/^www\./, "")
-  const fullVisibleText = cleanText(document.body.innerText)
-  const visibleText    = fullVisibleText
+  const structuredData = getStructuredData()
+  const distilledText = distillPageText()
+  const visibleText = document.body.innerText || ""
+  const cleanVisibleText = cleanText(visibleText)
   const imageCandidates = findImageCandidates()
+  const localExtraction = extractLocalProfile({
+    sourceUrl,
+    sourceHost,
+    structuredData,
+    visibleText: cleanVisibleText,
+    imageCandidates
+  })
+  const confidence = calculateConfidence(localExtraction)
+
+  const skillsSections = findLabeledSections(["skills", "skill"])
+  const experienceSections = findLabeledSections(["experience", "experiences"])
+  const educationSections = findLabeledSections(["education"])
+  const certificationSections = findLabeledSections(["certifications", "certification", "licenses"])
+  const projectsSections = findLabeledSections(["projects", "project"])
+  const languagesSections = findLabeledSections(["languages", "language"])
+
+  // Debug logging
+  console.log("🔍 SECTION EXTRACTION DEBUG:")
+  console.log("Skills sections found:", skillsSections.length, "Total chars:", skillsSections.join("").length)
+  console.log("Experience sections found:", experienceSections.length, "Total chars:", experienceSections.join("").length)
+  console.log("Education sections found:", educationSections.length, "Total chars:", educationSections.join("").length)
+  console.log("Languages sections found:", languagesSections.length, "Total chars:", languagesSections.join("").length)
+  
+  // If no sections found, use full visible text as fallback
+  console.log("📄 Full page text length:", visibleText.length, "chars")
+  console.log("📄 Distilled text length:", distilledText.length, "chars")
+  
+  // Use visible_text as primary source when sections aren't found
+  const primaryText = visibleText.length > distilledText.length ? visibleText : distilledText
+  console.log("⚠️ Using fallback: sending full page text for missing sections")
+  console.log("📤 Primary text length:", primaryText.length, "chars")
 
   return {
     source_platform:  sourceHost,
@@ -239,23 +131,28 @@ async function buildRawProfile() {
     extracted_at:     new Date().toISOString(),
     page_title:       document.title,
     meta:             getMetaData(),
+    structured_data: structuredData,
     candidate_name:   findBestNameCandidate(),
     candidate_description: findBestDescriptionCandidate(),
     candidate_image:  imageCandidates[0]?.src || "",
     image_candidates: imageCandidates,
-    emails:           findEmails(visibleText),
-    phones:           findPhones(visibleText),
+    emails:           findEmails(cleanVisibleText),
+    phones:           findPhones(cleanVisibleText),
     links:            findLinks(),
     headings:         findHeadings(),
     sections:         findSections(),
-    skills_sections: findLabeledSections(["skills", "skill"]),
-    experience_sections: findLabeledSections(["experience", "experiences"]),
-    education_sections: findLabeledSections(["education"]),
-    certification_sections: findLabeledSections(["certifications", "certification", "licenses"]),
-    projects_sections: findLabeledSections(["projects", "project"]),
+    skills_sections: skillsSections.length > 0 ? skillsSections : [],
+    experience_sections: experienceSections.length > 0 ? experienceSections : [],
+    education_sections: educationSections.length > 0 ? educationSections : [],
+    certification_sections: certificationSections.length > 0 ? certificationSections : [],
+    projects_sections: projectsSections.length > 0 ? projectsSections : [],
+    languages_sections: languagesSections.length > 0 ? languagesSections : [],
     contact_links: findContactLinks(),
     social_links: findSocialLinks(),
-    visible_text:     visibleText
+    distilled_text: "",
+    local_extraction: localExtraction,
+    confidence,
+    visible_text:     primaryText
   }
 }
 
@@ -275,6 +172,88 @@ function getMetaContent(name) {
   return document
     .querySelector(`meta[name="${name}"], meta[property="${name}"]`)
     ?.content?.trim() || ""
+}
+
+function getStructuredData() {
+  return {
+    json_ld: getJsonLdData(),
+    open_graph: getOpenGraphData(),
+    meta: getAllMetaData()
+  }
+}
+
+function getJsonLdData() {
+  return [...document.querySelectorAll('script[type="application/ld+json"]')]
+    .map(script => {
+      try {
+        return JSON.parse(script.textContent || "")
+      } catch {
+        return null
+      }
+    })
+    .filter(Boolean)
+}
+
+function getOpenGraphData() {
+  const data = {}
+
+  document.querySelectorAll('meta[property^="og:"], meta[property^="profile:"]').forEach(meta => {
+    const key = meta.getAttribute("property")
+    const value = meta.getAttribute("content")
+
+    if (key && value) {
+      data[key] = value.trim()
+    }
+  })
+
+  return data
+}
+
+function getAllMetaData() {
+  const data = {}
+
+  document.querySelectorAll("meta[name], meta[property]").forEach(meta => {
+    const key = meta.getAttribute("name") || meta.getAttribute("property")
+    const value = meta.getAttribute("content")
+
+    if (key && value) {
+      data[key] = value.trim()
+    }
+  })
+
+  return data
+}
+
+function distillPageText() {
+  const root = document.querySelector("main, article, [role='main']") || document.body
+  const clone = root.cloneNode(true)
+
+  clone.querySelectorAll([
+    "script",
+    "style",
+    "svg",
+    "canvas",
+    "noscript",
+    "nav",
+    "footer",
+    "aside",
+    "button",
+    "[role='button']",
+    "[role='navigation']",
+    "[aria-hidden='true']",
+    "[hidden]"
+  ].join(",")).forEach(element => element.remove())
+
+  const blocks = [...clone.querySelectorAll("h1,h2,h3,h4,p,li,dt,dd,span")]
+    .map(element => cleanText(element.innerText || element.textContent || ""))
+    .filter(text => text.length >= 2)
+    .filter(text => !isLikelyBoilerplateText(text))
+
+  return unique(blocks).join("\n")
+}
+
+function isLikelyBoilerplateText(text) {
+  return /^(home|menu|search|notifications|messaging|jobs|premium|advertising|privacy|terms|help|settings)$/i.test(text)
 }
 
 // ─────────────────────────────────────────────
@@ -433,33 +412,122 @@ function findSections() {
 function findLabeledSections(labels) {
   const normalizedLabels = labels.map(label => label.toLowerCase())
   const sections = []
+  const seenTexts = new Set()
 
-  document.querySelectorAll("h1,h2,h3,h4").forEach(heading => {
-    const headingText = cleanText(heading.innerText || "")
-    const headingKey = headingText.toLowerCase()
-
-    if (!normalizedLabels.some(label => headingKey.includes(label))) {
-      return
+  // Get the main content area
+  const mainContent = document.querySelector('main') || document.body
+  
+  // Get ALL text from the page
+  const fullPageText = mainContent.innerText || mainContent.textContent || ""
+  
+  // Split by double newlines to get blocks
+  const blocks = fullPageText.split(/\n\n+/)
+  
+  // Find blocks that contain our target labels
+  let captureMode = false
+  let currentSection = []
+  
+  for (let i = 0; i < blocks.length; i++) {
+    const block = blocks[i].trim()
+    if (!block) continue
+    
+    const blockLower = block.toLowerCase()
+    
+    // Check if this block is a section header we're looking for
+    const isTargetHeader = normalizedLabels.some(label => {
+      const lines = block.split('\n')
+      const firstLine = lines[0].toLowerCase().trim()
+      return firstLine === label || 
+             firstLine === label + 's' ||
+             firstLine.includes(label) ||
+             blockLower.startsWith(label)
+    })
+    
+    if (isTargetHeader) {
+      // Save previous section if any
+      if (currentSection.length > 0) {
+        const sectionText = currentSection.join('\n\n')
+        if (sectionText.length >= 50 && !seenTexts.has(sectionText)) {
+          seenTexts.add(sectionText)
+          sections.push(sectionText)
+          console.log(`✅ Captured section: ${sectionText.substring(0, 50)}... (${sectionText.length} chars)`)
+        }
+      }
+      
+      // Start new section
+      captureMode = true
+      currentSection = [block]
+      console.log(`✅ Found section header: "${block.split('\n')[0]}"`)
+      continue
     }
-
-    const container = findUsefulSectionContainer(heading, headingText)
-    const text = cleanText(container?.innerText || "")
-
-    if (text.length >= 20) {
-      sections.push(text)
+    
+    // Check if we hit another major section (stop capturing)
+    const isOtherMajorSection = /^(about|activity|analytics|resources|featured|posts|articles|recommendations|interests|groups|events|courses|honors|awards|publications|patents|test scores|organizations|volunteering)/i.test(block.split('\n')[0])
+    
+    if (captureMode && isOtherMajorSection) {
+      // Save current section and stop
+      if (currentSection.length > 0) {
+        const sectionText = currentSection.join('\n\n')
+        if (sectionText.length >= 50 && !seenTexts.has(sectionText)) {
+          seenTexts.add(sectionText)
+          sections.push(sectionText)
+          console.log(`✅ Captured section: ${sectionText.substring(0, 50)}... (${sectionText.length} chars)`)
+        }
+      }
+      captureMode = false
+      currentSection = []
+      continue
     }
-  })
+    
+    // If in capture mode, add this block
+    if (captureMode) {
+      currentSection.push(block)
+    }
+  }
+  
+  // Don't forget the last section
+  if (currentSection.length > 0) {
+    const sectionText = currentSection.join('\n\n')
+    if (sectionText.length >= 50 && !seenTexts.has(sectionText)) {
+      seenTexts.add(sectionText)
+      sections.push(sectionText)
+      console.log(`✅ Captured final section: ${sectionText.substring(0, 50)}... (${sectionText.length} chars)`)
+    }
+  }
 
-  return unique(sections).slice(0, 10)
+  console.log(`📊 Total sections found for [${labels.join(", ")}]: ${sections.length}`)
+  
+  return sections
+}
+
+function findSectionHeadingCandidates() {
+  const semanticHeadings = [...document.querySelectorAll("h1,h2,h3,h4,h5,[role='heading']")]
+  const textHeadings = [...document.querySelectorAll("section *, main *, article *, div[id*='experience'], div[id*='education'], div[id*='skills']")]
+    .filter(el => {
+      if (!isVisible(el)) {
+        return false
+      }
+
+      const text = cleanText(el.innerText || el.getAttribute("aria-label") || el.textContent || "")
+      return /^(experience|education|skills?|licenses & certifications|certifications|projects|languages?)$/i.test(text)
+    })
+
+  return uniqueElements([...semanticHeadings, ...textHeadings])
 }
 
 function findUsefulSectionContainer(heading, headingText) {
+  const nearestSection = heading.closest("section")
+
+  if (nearestSection) {
+    return nearestSection
+  }
+
   let current = heading.parentElement
 
   while (current && current !== document.body) {
-    const text = cleanText(current.innerText || "")
+    const text = cleanMultilineText(current.innerText || "")
 
-    if (text.length > headingText.length + 80) {
+    if (text.length > headingText.length + 40 && text.length < 50000) {
       return current
     }
 
@@ -467,6 +535,37 @@ function findUsefulSectionContainer(heading, headingText) {
   }
 
   return heading.closest("section, article, main, div") || heading.parentElement
+}
+
+function normalizeSectionLabel(text) {
+  return cleanText(text).toLowerCase()
+}
+
+function extractVisibleTextFromSection(container) {
+  if (!container) {
+    return ""
+  }
+
+  // Clone the container to avoid modifying the actual DOM
+  const clone = container.cloneNode(true)
+
+  // Remove elements that shouldn't be included in text extraction
+  clone.querySelectorAll([
+    "script",
+    "style",
+    "svg",
+    "canvas",
+    "noscript"
+  ].join(",")).forEach(element => element.remove())
+
+  // Get all text content including from elements that might be visually hidden but in DOM
+  const allText = clone.innerText || clone.textContent || ""
+  
+  return cleanMultilineText(allText)
+}
+
+function normalizeSectionLabel(text) {
+  return cleanText(text).toLowerCase()
 }
 
 function findContactLinks() {
@@ -486,6 +585,158 @@ function findSocialLinks() {
 // ─────────────────────────────────────────────
 // HELPERS
 // ─────────────────────────────────────────────
+
+function extractLocalProfile({ sourceUrl, sourceHost, structuredData, visibleText, imageCandidates }) {
+  const candidateName = findStructuredName(structuredData) || findBestNameCandidate()
+  const fullName = cleanProfileName(candidateName)
+  const nameParts = splitName(fullName)
+  const links = findLinks()
+  const socialLinks = findSocialLinks()
+  const skillsSections = findLabeledSections(["skills", "skill"])
+  const experienceSections = findLabeledSections(["experience", "experiences"])
+  const educationSections = findLabeledSections(["education"])
+  const certificationSections = findLabeledSections(["certifications", "certification", "licenses"])
+  const projectSections = findLabeledSections(["projects", "project"])
+
+  return {
+    source_url: sourceUrl,
+    source_host: sourceHost,
+    full_name: fullName,
+    first_name: nameParts.firstName,
+    last_name: nameParts.lastName,
+    headline: findHeadline(structuredData),
+    location: findLocationCandidate(visibleText),
+    email: findEmails(visibleText)[0] || "",
+    phone: findPhones(visibleText)[0] || "",
+    website: findWebsiteLink(links, sourceHost),
+    linkedin: findLinkByHost(socialLinks, "linkedin.com"),
+    github: findLinkByHost(socialLinks, "github.com"),
+    twitter: findLinkByHost(socialLinks, "twitter.com") || findLinkByHost(socialLinks, "x.com"),
+    profile_photo_url: imageCandidates[0]?.src || getMetaData().image || "",
+    skills: extractSkillsFromSections(skillsSections),
+    experience_sections: experienceSections,
+    education_sections: educationSections,
+    certification_sections: certificationSections,
+    projects_sections: projectSections,
+    social_links: socialLinks
+  }
+}
+
+function calculateConfidence(localExtraction) {
+  let score = 0
+  const reasons = []
+
+  addConfidence(Boolean(localExtraction.full_name), 20, "name")
+  addConfidence(Boolean(localExtraction.headline), 15, "headline")
+  addConfidence(Boolean(localExtraction.location), 10, "location")
+  addConfidence(Boolean(localExtraction.email || localExtraction.linkedin || localExtraction.github), 10, "contact_or_social")
+  addConfidence(localExtraction.skills.length > 0, 15, "skills")
+  addConfidence(localExtraction.experience_sections.length > 0, 20, "experience")
+  addConfidence(localExtraction.education_sections.length > 0, 15, "education")
+  addConfidence(Boolean(localExtraction.profile_photo_url), 5, "profile_photo")
+
+  return {
+    score,
+    level: score >= 70 ? "high" : score >= 40 ? "medium" : "low",
+    reasons
+  }
+
+  function addConfidence(condition, points, reason) {
+    if (!condition) {
+      return
+    }
+
+    score += points
+    reasons.push(reason)
+  }
+}
+
+function findStructuredName(structuredData) {
+  const values = flattenStructuredValues(structuredData.json_ld)
+  const profileFirstName = structuredData.open_graph["profile:first_name"]
+  const profileLastName = structuredData.open_graph["profile:last_name"]
+
+  return values.find(value => value.key === "name")?.value ||
+    (profileFirstName ? `${profileFirstName} ${profileLastName || ""}`.trim() : "") ||
+    structuredData.open_graph["og:title"] ||
+    ""
+}
+
+function findHeadline(structuredData) {
+  return structuredData.meta.description ||
+    structuredData.open_graph["og:description"] ||
+    structuredData.meta["twitter:description"] ||
+    ""
+}
+
+function findLocationCandidate(text) {
+  const locationMatch = text.match(/\b[A-Z][a-zA-Z .'-]+,\s*[A-Z][a-zA-Z .'-]+(?:,\s*[A-Z][a-zA-Z .'-]+)?\b/)
+
+  return locationMatch?.[0] || ""
+}
+
+function flattenStructuredValues(value, result = []) {
+  if (Array.isArray(value)) {
+    value.forEach(item => flattenStructuredValues(item, result))
+    return result
+  }
+
+  if (!value || typeof value !== "object") {
+    return result
+  }
+
+  Object.entries(value).forEach(([key, nestedValue]) => {
+    if (typeof nestedValue === "string") {
+      result.push({ key, value: nestedValue })
+      return
+    }
+
+    flattenStructuredValues(nestedValue, result)
+  })
+
+  return result
+}
+
+function extractSkillsFromSections(sections) {
+  const labelPattern = /^(skills?|top skills?|show all|see all|\d+\s+endorsements?)$/i
+
+  return unique(sections
+    .flatMap(section => section.split(/[,|\n]/))
+    .map(cleanText)
+    .filter(skill => skill.length >= 2 && skill.length <= 60)
+    .filter(skill => !labelPattern.test(skill)))
+    .slice(0, 50)
+}
+
+function cleanProfileName(name) {
+  return cleanText(name)
+    .replace(/\s+[|-]\s+.+$/i, "")
+    .replace(/\s+profile$/i, "")
+}
+
+function splitName(fullName) {
+  const parts = cleanText(fullName).split(" ").filter(Boolean)
+
+  return {
+    firstName: parts[0] || "",
+    lastName: parts.slice(1).join(" ")
+  }
+}
+
+function findLinkByHost(links, host) {
+  return links.find(link => link.href.toLowerCase().includes(host))?.href || ""
+}
+
+function findWebsiteLink(links, sourceHost) {
+  return links.find(link => {
+    try {
+      const host = new URL(link.href).hostname.replace(/^www\./, "")
+      return sourceHost && host !== sourceHost
+    } catch {
+      return false
+    }
+  })?.href || ""
+}
 
 function isVisible(el) {
   const rect  = el.getBoundingClientRect()
@@ -509,7 +760,19 @@ function cleanText(text) {
   return String(text || "").replace(/\s+/g, " ").trim()
 }
 
+function cleanMultilineText(text) {
+  return String(text || "")
+    .split(/\r?\n/)
+    .map(line => cleanText(line))
+    .filter(Boolean)
+    .join("\n")
+}
+
 function unique(values) {
+  return [...new Set(values.filter(Boolean))]
+}
+
+function uniqueElements(values) {
   return [...new Set(values.filter(Boolean))]
 }
 
