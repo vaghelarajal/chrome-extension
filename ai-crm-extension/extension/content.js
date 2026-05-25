@@ -42,105 +42,244 @@ if (!window.profileScraperContentLoaded) {
   })
 }
 
+// ─────────────────────────────────────────────
+// PHASE ORCHESTRATOR
+// ─────────────────────────────────────────────
+
 async function preparePageForScraping() {
+  // Phase 1: scroll to trigger lazy loading
   await scrollForLazyContent()
   window.scrollTo({ top: 0, behavior: "instant" })
-  await wait(250)
+  await wait(300)
+
+  // Phase 2: click all expandable buttons
+  const clickCount = await clickAllExpandableButtons()
+
+  if (clickCount > 0) {
+    // Wait longer — LinkedIn does network requests after button clicks
+    await waitForExpandedContent()
+    await wait(500)
+  }
+
+  // Phase 3: scroll again to load any newly revealed content
+  await scrollForLazyContent()
+  await wait(400)
+
+  // Phase 4: back to top for extraction
+  window.scrollTo({ top: 0, behavior: "instant" })
+  await wait(200)
 }
 
+// ─────────────────────────────────────────────
+// SCROLL — triggers LinkedIn lazy loading
+// ─────────────────────────────────────────────
+
 async function scrollForLazyContent() {
-  const maxScrolls = 11
+  const maxScrolls  = 12
   const viewportStep = Math.max(450, Math.floor(window.innerHeight * 0.65))
   let previousHeight = 0
 
   window.scrollTo({ top: 0, behavior: "instant" })
   await wait(200)
 
-  for (let index = 0; index < maxScrolls; index += 1) {
+  for (let i = 0; i < maxScrolls; i++) {
     window.scrollBy({ top: viewportStep, behavior: "smooth" })
     await wait(550)
 
     const currentHeight = document.documentElement.scrollHeight
+    const atBottom = window.scrollY + window.innerHeight >= currentHeight - 20
 
-    if (currentHeight === previousHeight && window.scrollY + window.innerHeight >= currentHeight - 20) {
-      break
-    }
-
+    if (currentHeight === previousHeight && atBottom) break
     previousHeight = currentHeight
   }
 
   await wait(500)
 }
 
-function isVisible(element) {
-  const rect = element.getBoundingClientRect()
-  const style = window.getComputedStyle(element)
+// ─────────────────────────────────────────────
+// CLICK EXPANDABLE BUTTONS
+// ─────────────────────────────────────────────
 
-  return rect.width > 0 &&
-    rect.height > 0 &&
-    style.visibility !== "hidden" &&
-    style.display !== "none" &&
-    Number(style.opacity) !== 0
+async function clickAllExpandableButtons() {
+  // What we WANT to click
+  const safePatterns = [
+    /show\s*all/i,       // "Show all 12 skills"
+    /see\s*all/i,        // "See all experiences"
+    /show\s*more/i,      // "Show more"
+    /see\s*more/i,       // "See more"
+    /view\s*more/i,      // "View more"
+    /load\s*more/i,      // "Load more"
+    /expand/i,           // "Expand"
+    /read\s*more/i,      // "Read more"
+    /^more$/i            // Just "more"
+  ]
+
+  // What we NEVER click — social / destructive actions
+  const dangerousPatterns = [
+    /follow/i, /connect/i, /message/i, /like/i,
+    /share/i,  /apply/i,   /submit/i,  /join/i,
+    /subscribe/i, /sign\s*in/i, /log\s*in/i,
+    /login/i, /register/i, /next/i, /accept/i,
+    /reject/i, /buy/i, /download/i,
+    /comment/i,  /repost/i, /invite/i,
+    /save/i, /send/i, /post/i, /delete/i,
+    /react/i, /emoji/i, /report/i, /block/i,
+    /dismiss/i, /close/i, /cancel/i
+  ]
+
+  function getButtonText(el) {
+    return (
+      el.innerText?.trim() ||
+      el.getAttribute("aria-label")?.trim() ||
+      el.getAttribute("title")?.trim() ||
+      ""
+    )
+  }
+
+  function isSafe(el) {
+    const text = getButtonText(el).toLowerCase()
+    if (!text) return false
+    const safe      = safePatterns.some(p => p.test(text))
+    const dangerous = dangerousPatterns.some(p => p.test(text))
+    return safe && !dangerous && isVisible(el)
+  }
+
+  // ── Collect safe buttons ──
+  const candidates = [
+    ...document.querySelectorAll("button"),
+    ...document.querySelectorAll("a[href]"),
+    ...document.querySelectorAll("[role='button']"),
+    ...document.querySelectorAll("[aria-expanded='false']")
+  ]
+
+  const toClick = []
+  const seen    = new Set()
+
+  for (const el of candidates) {
+    if (!seen.has(el) && isSafe(el)) {
+      seen.add(el)
+      toClick.push(el)
+    }
+  }
+
+  // ── Click each one with real mouse events ──
+  // Raw .click() is blocked by LinkedIn's React event system
+  // dispatchEvent with MouseEvent bypasses that
+  let clicked = 0
+
+  for (const el of toClick) {
+    try {
+      el.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true }))
+      el.dispatchEvent(new MouseEvent("mouseup",   { bubbles: true, cancelable: true }))
+      el.dispatchEvent(new MouseEvent("click",     { bubbles: true, cancelable: true }))
+      clicked++
+      await wait(200) // small gap so LinkedIn doesn't ignore rapid clicks
+    } catch (err) {
+      // Ignore failed expansion clicks so scraping can continue.
+    }
+  }
+
+  return clicked
 }
 
-function getElementKey(element) {
-  return [
-    cleanText(element.innerText || element.getAttribute("aria-label") || ""),
-    element.href || "",
-    element.getAttribute("aria-controls") || "",
-    element.getAttribute("data-control-name") || ""
-  ].join("|")
+// ─────────────────────────────────────────────
+// WAIT FOR EXPANDED CONTENT TO SETTLE
+// ─────────────────────────────────────────────
+
+async function waitForExpandedContent() {
+  const maxWait       = 5000  // increased — LinkedIn does network calls
+  const settleDuration = 800  // increased — wait longer for content to stop changing
+  let lastMutationTime = Date.now()
+  let mutationCount    = 0
+
+  return new Promise((resolve) => {
+    const timeout = setTimeout(() => {
+      observer.disconnect()
+      resolve(false)
+    }, maxWait)
+
+    const observer = new MutationObserver(() => {
+      mutationCount++
+      lastMutationTime = Date.now()
+    })
+
+    observer.observe(document.body, {
+      childList:     true,
+      subtree:       true,
+      attributes:    false,
+      characterData: false
+    })
+
+    const checkSettled = setInterval(() => {
+      if (Date.now() - lastMutationTime >= settleDuration) {
+        clearInterval(checkSettled)
+        clearTimeout(timeout)
+        observer.disconnect()
+        resolve(true)
+      }
+    }, 100)
+  })
 }
 
-function wait(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms))
-}
+// ─────────────────────────────────────────────
+// BUILD RAW PROFILE
+// ─────────────────────────────────────────────
 
 async function buildRawProfile() {
-  const sourceUrl = window.location.href
-  const sourceHost = window.location.hostname.replace(/^www\./, "")
+  const sourceUrl      = window.location.href
+  const sourceHost     = window.location.hostname.replace(/^www\./, "")
   const fullVisibleText = cleanText(document.body.innerText)
-  const visibleText = fullVisibleText.length > 15000 ? fullVisibleText.slice(0, 15000) : fullVisibleText
+  const visibleText    = fullVisibleText
   const imageCandidates = findImageCandidates()
 
   return {
-    source_platform: sourceHost,
-    source_url: sourceUrl,
-    source_host: sourceHost,
-    extracted_at: new Date().toISOString(),
-    page_title: document.title,
-    meta: getMetaData(),
-    candidate_name: findBestNameCandidate(),
+    source_platform:  sourceHost,
+    source_url:       sourceUrl,
+    source_host:      sourceHost,
+    extracted_at:     new Date().toISOString(),
+    page_title:       document.title,
+    meta:             getMetaData(),
+    candidate_name:   findBestNameCandidate(),
     candidate_description: findBestDescriptionCandidate(),
-    candidate_image: imageCandidates[0]?.src || "",
+    candidate_image:  imageCandidates[0]?.src || "",
     image_candidates: imageCandidates,
-    emails: findEmails(visibleText),
-    phones: findPhones(visibleText),
-    links: findLinks(),
-    headings: findHeadings(),
-    sections: findSections(),
-    expanded_pages: [],
-    visible_text: visibleText
+    emails:           findEmails(visibleText),
+    phones:           findPhones(visibleText),
+    links:            findLinks(),
+    headings:         findHeadings(),
+    sections:         findSections(),
+    skills_sections: findLabeledSections(["skills", "skill"]),
+    experience_sections: findLabeledSections(["experience", "experiences"]),
+    education_sections: findLabeledSections(["education"]),
+    certification_sections: findLabeledSections(["certifications", "certification", "licenses"]),
+    projects_sections: findLabeledSections(["projects", "project"]),
+    contact_links: findContactLinks(),
+    social_links: findSocialLinks(),
+    visible_text:     visibleText
   }
 }
 
+// ─────────────────────────────────────────────
+// META
+// ─────────────────────────────────────────────
+
 function getMetaData() {
   return {
-    title: getMetaContent("og:title") || getMetaContent("twitter:title") || "",
-    description: getMetaContent("description") ||
-      getMetaContent("og:description") ||
-      getMetaContent("twitter:description") ||
-      "",
-    image: getMetaContent("og:image") || getMetaContent("twitter:image") || ""
+    title:       getMetaContent("og:title")       || getMetaContent("twitter:title")       || "",
+    description: getMetaContent("description")    || getMetaContent("og:description")      || getMetaContent("twitter:description") || "",
+    image:       getMetaContent("og:image")       || getMetaContent("twitter:image")       || ""
   }
 }
 
 function getMetaContent(name) {
   return document
     .querySelector(`meta[name="${name}"], meta[property="${name}"]`)
-    ?.content
-    ?.trim() || ""
+    ?.content?.trim() || ""
 }
+
+// ─────────────────────────────────────────────
+// NAME + DESCRIPTION
+// ─────────────────────────────────────────────
 
 function findBestNameCandidate() {
   const candidates = [
@@ -149,7 +288,6 @@ function findBestNameCandidate() {
     getMetaContent("twitter:title"),
     document.title
   ]
-
   return cleanText(candidates.find(Boolean) || "")
 }
 
@@ -160,210 +298,221 @@ function findBestDescriptionCandidate() {
     getMetaContent("twitter:description"),
     ...textFromSelectors("main p, article p, section p")
   ]
-
   return cleanText(candidates.find(Boolean) || "").slice(0, 1000)
 }
 
+// ─────────────────────────────────────────────
+// IMAGES
+// ─────────────────────────────────────────────
+
 function findImageCandidates() {
   const metaImage = getMetaContent("og:image") || getMetaContent("twitter:image")
-  const pageName = cleanText(findBestNameCandidate())
+  const pageName  = cleanText(findBestNameCandidate())
+
   const candidates = [...document.querySelectorAll("img[src]")]
-    .map((image) => {
-      const rect = image.getBoundingClientRect()
-      const width = image.naturalWidth || image.width || Math.round(rect.width) || 0
-      const height = image.naturalHeight || image.height || Math.round(rect.height) || 0
+    .map((img) => {
+      const rect   = img.getBoundingClientRect()
+      const width  = img.naturalWidth  || img.width  || Math.round(rect.width)  || 0
+      const height = img.naturalHeight || img.height || Math.round(rect.height) || 0
       const nearbyText = cleanText(
-        image.closest("section, article, header, main, div")?.innerText || ""
+        img.closest("section, article, header, main, div")?.innerText || ""
       ).slice(0, 300)
 
       return {
-        src: image.src,
-        alt: cleanText(image.alt),
+        src: img.src,
+        alt: cleanText(img.alt),
         width,
         height,
         nearby_text: nearbyText,
-        score: scoreImageCandidate(image, width, height, nearbyText, pageName)
+        score: scoreImage(img, width, height, nearbyText, pageName)
       }
     })
-    .filter((image) => image.src.startsWith("http"))
-    .filter((image) => image.width >= 64 && image.height >= 64)
-    .filter((image) => !isLikelyLogoOrIcon(image))
+    .filter(img => img.src.startsWith("http"))
+    .filter(img => img.width >= 64 && img.height >= 64)
+    .filter(img => !isLikelyLogoOrIcon(img))
 
   if (metaImage) {
-    candidates.push({
-      src: metaImage,
-      alt: "meta image",
-      width: 0,
-      height: 0,
-      nearby_text: "",
-      score: 1
-    })
+    candidates.push({ src: metaImage, alt: "meta image", width: 0, height: 0, nearby_text: "", score: 1 })
   }
 
   return candidates
     .sort((a, b) => b.score - a.score)
     .slice(0, 8)
-    .map(({ score, ...image }) => image)
+    .map(({ score, ...img }) => img)
 }
 
-function scoreImageCandidate(image, width, height, nearbyText, pageName) {
-  const alt = image.alt || ""
-  const src = image.src || ""
-  const className = String(image.className || "")
-  const id = image.id || ""
-  const combinedText = `${alt} ${src} ${className} ${id} ${nearbyText}`.toLowerCase()
-  const aspectRatio = width && height ? width / height : 1
+function scoreImage(img, width, height, nearbyText, pageName) {
+  const combined = `${img.alt} ${img.src} ${img.className} ${img.id} ${nearbyText}`.toLowerCase()
+  const ratio    = width && height ? width / height : 1
   let score = 0
 
-  if (combinedText.match(/profile|avatar|photo|headshot|portrait|person|user/)) {
-    score += 6
-  }
-
-  const normalizedPageName = pageName.toLowerCase()
-
-  if (normalizedPageName && combinedText.includes(normalizedPageName)) {
-    score += 8
-  }
-
-  if (aspectRatio >= 0.65 && aspectRatio <= 1.45) {
-    score += 3
-  }
-
-  if (width >= 96 && height >= 96) {
-    score += 2
-  }
-
-  if (width >= 500 || height >= 300) {
-    score -= 2
-  }
-
-  if (combinedText.match(/banner|cover|background|logo|icon|sprite|emoji|badge|ad/)) {
-    score -= 5
-  }
-
-  if (isInsidePageChrome(image)) {
-    score -= 8
-  }
-
-  if (normalizedPageName && !combinedText.includes(normalizedPageName) && nearbyText.length > 0) {
-    score -= 2
-  }
+  if (combined.match(/profile|avatar|photo|headshot|portrait|person|user/)) score += 6
+  if (pageName && combined.includes(pageName.toLowerCase()))                 score += 8
+  if (ratio >= 0.65 && ratio <= 1.45)                                        score += 3
+  if (width >= 96 && height >= 96)                                           score += 2
+  if (width >= 500 || height >= 300)                                         score -= 2
+  if (combined.match(/banner|cover|background|logo|icon|sprite|emoji|badge|ad/)) score -= 5
+  if (img.closest?.("nav, header, aside, footer, [role='navigation']"))      score -= 8
 
   return score
 }
 
-function isInsidePageChrome(element) {
-  const container = element.closest("nav, header, aside, footer, [role='navigation'], [role='banner'], [aria-label*='navigation' i]")
-
-  return Boolean(container)
+function isLikelyLogoOrIcon(img) {
+  return /logo|icon|sprite|favicon|badge/.test(`${img.alt} ${img.src}`.toLowerCase())
 }
 
-function isLikelyLogoOrIcon(image) {
-  const text = `${image.alt} ${image.src}`.toLowerCase()
-
-  return Boolean(text.match(/logo|icon|sprite|favicon|badge/))
-}
+// ─────────────────────────────────────────────
+// EMAILS + PHONES
+// ─────────────────────────────────────────────
 
 function findEmails(text) {
   const mailtoEmails = [...document.querySelectorAll('a[href^="mailto:"]')]
-    .map((link) => link.href.replace("mailto:", "").split("?")[0].trim())
-    .filter((email) => /^[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}$/i.test(email))
-    .filter(Boolean)
+    .map(l => l.href.replace("mailto:", "").split("?")[0].trim())
+    .filter(e => /^[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}$/i.test(e))
 
   const textEmails = (text.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi) || [])
-    .filter((email) => {
-      const domain = email.split("@")[1]?.toLowerCase()
-      return !["example.com", "test.com", "demo.com", "placeholder.com"].includes(domain)
-    })
+    .filter(e => !["example.com","test.com","demo.com","placeholder.com"]
+      .includes(e.split("@")[1]?.toLowerCase()))
 
   return unique([...mailtoEmails, ...textEmails]).slice(0, 10)
 }
 
 function findPhones(text) {
   const telPhones = [...document.querySelectorAll('a[href^="tel:"]')]
-    .map((link) => normalizePhone(link.href.replace("tel:", "")))
+    .map(l => normalizePhone(l.href.replace("tel:", "")))
     .filter(Boolean)
 
-  const textPhones = findLabeledPhones(text)
-
-  return unique([...telPhones, ...textPhones]).slice(0, 5)
-}
-
-function findLabeledPhones(text) {
-  const phoneMatches = []
-  const labeledPhonePattern = /(?:phone|mobile|tel|telephone|contact|call|whatsapp)\s*:?\s*(\+?\d[\d\s().-]{7,}\d)/gi
-  let match = labeledPhonePattern.exec(text)
-
-  while (match) {
-    const phone = normalizePhone(match[1])
-
-    if (phone) {
-      phoneMatches.push(phone)
-    }
-
-    match = labeledPhonePattern.exec(text)
+  const labeledPhones = []
+  const pattern = /(?:phone|mobile|tel|telephone|contact|call|whatsapp)\s*:?\s*(\+?\d[\d\s().-]{7,}\d)/gi
+  let match
+  while ((match = pattern.exec(text)) !== null) {
+    const p = normalizePhone(match[1])
+    if (p) labeledPhones.push(p)
   }
 
-  return phoneMatches
+  return unique([...telPhones, ...labeledPhones]).slice(0, 5)
 }
 
 function normalizePhone(value) {
-  const cleanValue = String(value || "").trim()
-  const digits = cleanValue.replace(/\D/g, "")
-
-  if (digits.length < 10 || digits.length > 15) {
-    return ""
-  }
-
-  if (/(\d)\1{7,}/.test(digits)) {
-    return ""
-  }
-
-  return cleanValue
+  const clean  = String(value || "").trim()
+  const digits = clean.replace(/\D/g, "")
+  if (digits.length < 10 || digits.length > 15) return ""
+  if (/(\d)\1{7,}/.test(digits)) return ""
+  return clean
 }
+
+// ─────────────────────────────────────────────
+// LINKS + HEADINGS + SECTIONS
+// ─────────────────────────────────────────────
 
 function findLinks() {
   return [...document.querySelectorAll("a[href]")]
-    .map((link) => ({
-      text: cleanText(link.innerText).slice(0, 80),
-      href: link.href
-    }))
-    .filter((link) => link.href.startsWith("http"))
+    .map(l => ({ text: cleanText(l.innerText).slice(0, 80), href: l.href }))
+    .filter(l => l.href.startsWith("http"))
 }
 
 function findHeadings() {
-  return textFromSelectors("h1,h2,h3")
-    .map(cleanText)
-    .filter(Boolean)
+  return textFromSelectors("h1,h2,h3").map(cleanText).filter(Boolean)
 }
 
 function findSections() {
   const sections = []
   const mainContent = document.querySelector("main, article, [role='main']")
-  const targets = mainContent ? [mainContent] : document.querySelectorAll("main, article, section")
-  
-  targets.forEach((container) => {
+  const targets = mainContent
+    ? [mainContent]
+    : [...document.querySelectorAll("main, article, section")]
+
+  targets.forEach(container => {
     const text = cleanText(container.innerText)
-    if (text.length >= 40 && text.length <= 5000) {
+    if (text.length >= 40 && text.length <= 5000) sections.push(text)
+  })
+
+  return sections
+}
+
+function findLabeledSections(labels) {
+  const normalizedLabels = labels.map(label => label.toLowerCase())
+  const sections = []
+
+  document.querySelectorAll("h1,h2,h3,h4").forEach(heading => {
+    const headingText = cleanText(heading.innerText || "")
+    const headingKey = headingText.toLowerCase()
+
+    if (!normalizedLabels.some(label => headingKey.includes(label))) {
+      return
+    }
+
+    const container = findUsefulSectionContainer(heading, headingText)
+    const text = cleanText(container?.innerText || "")
+
+    if (text.length >= 20) {
       sections.push(text)
     }
   })
-  
-  return sections
+
+  return unique(sections).slice(0, 10)
+}
+
+function findUsefulSectionContainer(heading, headingText) {
+  let current = heading.parentElement
+
+  while (current && current !== document.body) {
+    const text = cleanText(current.innerText || "")
+
+    if (text.length > headingText.length + 80) {
+      return current
+    }
+
+    current = current.parentElement
+  }
+
+  return heading.closest("section, article, main, div") || heading.parentElement
+}
+
+function findContactLinks() {
+  return findLinks().filter(link => {
+    const text = `${link.text} ${link.href}`.toLowerCase()
+    return /mailto:|tel:|email|phone|contact|website/.test(text)
+  })
+}
+
+function findSocialLinks() {
+  return findLinks().filter(link => {
+    const href = link.href.toLowerCase()
+    return /linkedin\.com|github\.com|twitter\.com|x\.com|facebook\.com|instagram\.com/.test(href)
+  })
+}
+
+// ─────────────────────────────────────────────
+// HELPERS
+// ─────────────────────────────────────────────
+
+function isVisible(el) {
+  const rect  = el.getBoundingClientRect()
+  const style = window.getComputedStyle(el)
+  return (
+    rect.width > 0 &&
+    rect.height > 0 &&
+    style.visibility !== "hidden" &&
+    style.display    !== "none" &&
+    Number(style.opacity) !== 0
+  )
 }
 
 function textFromSelectors(selector) {
   return [...document.querySelectorAll(selector)]
-    .map((element) => element.innerText?.trim() || "")
+    .map(el => el.innerText?.trim() || "")
     .filter(Boolean)
 }
 
 function cleanText(text) {
-  return String(text || "")
-    .replace(/\s+/g, " ")
-    .trim()
+  return String(text || "").replace(/\s+/g, " ").trim()
 }
 
 function unique(values) {
   return [...new Set(values.filter(Boolean))]
+}
+
+function wait(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms))
 }

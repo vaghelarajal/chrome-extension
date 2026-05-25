@@ -60,17 +60,115 @@ app.post("/extract", (req, res) => {
 
 async function mapWithOpenAI(rawProfile) {
   const chunks = createProfileMappingChunks(rawProfile)
-  const mappedChunks = []
+  const partialExtractions = []
 
   for (const chunk of chunks) {
-    mappedChunks.push(await mapChunkWithOpenAI(chunk, chunks.length))
+    partialExtractions.push(await extractPartialChunkWithOpenAI(chunk, chunks.length))
   }
 
-  if (mappedChunks.length === 1) {
-    return normalizeMappedProfile(mappedChunks[0], rawProfile)
+  const mergedExtraction = mergePartialExtractions(partialExtractions, rawProfile)
+  const mappedProfile = await mapMergedExtractionWithOpenAI(mergedExtraction, rawProfile)
+
+  return normalizeMappedProfile(mappedProfile, rawProfile)
+}
+
+async function extractPartialChunkWithOpenAI(rawProfileChunk, totalChunks) {
+  return requestOpenAIJson({
+    schemaName: "profile_scraper_partial_extraction",
+    schema: PARTIAL_EXTRACTION_SCHEMA,
+    systemText: [
+      "You are ProfileScraper AI, a STRICT partial extraction engine. Accuracy over completeness.",
+      "Extract ONLY explicit facts from this raw chunk. Do not create the final CRM schema.",
+      "Return partial facts only: profile_summary, contact_info, organization, skills, experience, education, certifications, languages, projects, links.",
+      "If a fact is not clearly present in this chunk, leave it empty. Do not infer, guess, summarize, or fill from outside knowledge.",
+      "Ignore navigation, buttons, ads, recommendations, engagement metrics, logged-in viewer data, unrelated profiles, and boilerplate.",
+      "Extract only facts about the main profile subject from source_url.",
+      "For phones, extract only tel links or explicit Phone/Mobile/Tel/Call labels.",
+      "This is one chunk from a larger page. Return only facts supported by this chunk."
+    ].join(" "),
+    userPayload: {
+      instruction: "Extract partial profile facts from this chunk only. Do not map to the final schema yet.",
+      total_chunks: totalChunks,
+      raw_profile_chunk: rawProfileChunk
+    }
+  })
+}
+
+async function mapMergedExtractionWithOpenAI(mergedExtraction, rawProfile) {
+  return requestOpenAIJson({
+    schemaName: "profile_scraper_schema",
+    schema: PROFILE_JSON_SCHEMA,
+    systemText: [
+      "You are ProfileScraper AI, a STRICT final schema mapping engine.",
+      "Map the merged extracted facts into the final CRM JSON schema.",
+      "Use ONLY facts present in merged_extraction and raw_profile_summary. Do not use outside knowledge.",
+      "If a field is unknown, use an empty string or empty array.",
+      "Remove duplicates and keep the cleanest version of repeated skills, experience, education, certifications, projects, languages, and links.",
+      "Extract only the main profile subject from source_url, not adjacent people.",
+      "Do not invent emails, phone numbers, job titles, dates, schools, companies, or skills.",
+      "Return ONLY valid JSON with no markdown, explanations, or commentary."
+    ].join(" "),
+    userPayload: {
+      instruction: "Create one final clean structured profile schema from these merged facts.",
+      raw_profile_summary: createRawProfileSummary(rawProfile),
+      merged_extraction: mergedExtraction
+    }
+  })
+}
+
+async function requestOpenAIJson({ schemaName, schema, systemText, userPayload }) {
+  const response = await fetch("https://api.openai.com/v1/responses", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      model: OPENAI_MODEL,
+      input: [
+        {
+          role: "system",
+          content: [
+            {
+              type: "input_text",
+              text: systemText
+            }
+          ]
+        },
+        {
+          role: "user",
+          content: [
+            {
+              type: "input_text",
+              text: JSON.stringify(userPayload)
+            }
+          ]
+        }
+      ],
+      text: {
+        format: {
+          type: "json_schema",
+          name: schemaName,
+          strict: true,
+          schema
+        }
+      }
+    })
+  })
+
+  const result = await response.json()
+
+  if (!response.ok) {
+    throw new Error(result.error?.message || "OpenAI request failed")
   }
 
-  return mergeMappedProfiles(mappedChunks, rawProfile)
+  const outputText = result.output_text || extractOutputText(result)
+
+  if (!outputText) {
+    throw new Error("OpenAI returned no JSON output")
+  }
+
+  return JSON.parse(outputText)
 }
 
 async function mapChunkWithOpenAI(rawProfileChunk, totalChunks) {
@@ -166,6 +264,13 @@ function createProfileMappingChunks(rawProfile) {
     ...compactProfile,
     links: [],
     sections: [],
+    skills_sections: [],
+    experience_sections: [],
+    education_sections: [],
+    certification_sections: [],
+    projects_sections: [],
+    contact_links: [],
+    social_links: [],
     expanded_pages: [],
     visible_text: "",
     content_chunks: []
@@ -173,6 +278,19 @@ function createProfileMappingChunks(rawProfile) {
 
   const pieces = [
     ...createLinkPieces(compactProfile.links || []),
+    ...createLinkPieces(compactProfile.contact_links || []).map((piece) => ({
+      ...piece,
+      type: "contact_links"
+    })),
+    ...createLinkPieces(compactProfile.social_links || []).map((piece) => ({
+      ...piece,
+      type: "social_links"
+    })),
+    ...createTextPieces("skills_section", compactProfile.skills_sections || []),
+    ...createTextPieces("experience_section", compactProfile.experience_sections || []),
+    ...createTextPieces("education_section", compactProfile.education_sections || []),
+    ...createTextPieces("certification_section", compactProfile.certification_sections || []),
+    ...createTextPieces("projects_section", compactProfile.projects_sections || []),
     ...createTextPieces("section", compactProfile.sections || []),
     ...createExpandedPagePieces(compactProfile.expanded_pages || []),
     ...splitText(compactProfile.visible_text || "", CHUNK_CHAR_LIMIT).map((text, index) => ({
@@ -239,6 +357,13 @@ function compactRawProfile(rawProfile) {
     links: dedupeLinks(rawProfile.links || []),
     headings: uniqueStrings(rawProfile.headings || []),
     sections: uniqueStrings(rawProfile.sections || []),
+    skills_sections: uniqueStrings(rawProfile.skills_sections || []),
+    experience_sections: uniqueStrings(rawProfile.experience_sections || []),
+    education_sections: uniqueStrings(rawProfile.education_sections || []),
+    certification_sections: uniqueStrings(rawProfile.certification_sections || []),
+    projects_sections: uniqueStrings(rawProfile.projects_sections || []),
+    contact_links: dedupeLinks(rawProfile.contact_links || []),
+    social_links: dedupeLinks(rawProfile.social_links || []),
     expanded_pages: rawProfile.expanded_pages || [],
     visible_text: rawProfile.visible_text || ""
   }
@@ -370,6 +495,101 @@ function mergeMappedProfiles(mappedProfiles, rawProfile) {
   }
 
   return normalizeMappedProfile(finalProfile, rawProfile)
+}
+
+function mergePartialExtractions(partialExtractions, rawProfile) {
+  const merged = createEmptyPartialExtraction()
+
+  for (const partial of partialExtractions) {
+    mergeObjectFields(merged.profile_summary, partial.profile_summary || {}, {
+      bio: "longest",
+      headline: "longest",
+      profile_photo_url: "first"
+    })
+    mergeObjectFields(merged.contact_info, partial.contact_info || {})
+    mergeObjectFields(merged.organization, partial.organization || {})
+
+    merged.skills = uniqueStrings([...merged.skills, ...(partial.skills || [])])
+    merged.languages = uniqueStrings([...merged.languages, ...(partial.languages || [])])
+    merged.experience = dedupeObjects(
+      [...merged.experience, ...(partial.experience || [])],
+      experienceKey
+    )
+    merged.education = dedupeObjects(
+      [...merged.education, ...(partial.education || [])],
+      educationKey
+    )
+    merged.certifications = dedupeObjects(
+      [...merged.certifications, ...(partial.certifications || [])],
+      certificationKey
+    )
+    merged.projects = dedupeObjects(
+      [...merged.projects, ...(partial.projects || [])],
+      projectKey
+    )
+    merged.links = dedupeLinks([...merged.links, ...(partial.links || [])])
+  }
+
+  merged.contact_info.email = rawProfile.emails?.[0] || merged.contact_info.email
+  merged.contact_info.phone = rawProfile.phones?.[0] || ""
+
+  return merged
+}
+
+function createEmptyPartialExtraction() {
+  return {
+    profile_summary: {
+      first_name: "",
+      last_name: "",
+      full_name: "",
+      headline: "",
+      job_title: "",
+      bio: "",
+      location: "",
+      profile_photo_url: ""
+    },
+    contact_info: {
+      email: "",
+      phone: "",
+      website: "",
+      linkedin: "",
+      github: "",
+      twitter: ""
+    },
+    organization: {
+      company_name: "",
+      company_website: "",
+      industry: "",
+      company_size: "",
+      company_location: ""
+    },
+    skills: [],
+    experience: [],
+    education: [],
+    certifications: [],
+    languages: [],
+    projects: [],
+    links: []
+  }
+}
+
+function createRawProfileSummary(rawProfile) {
+  return {
+    source_platform: rawProfile.source_platform || "",
+    source_url: rawProfile.source_url || "",
+    source_host: rawProfile.source_host || "",
+    extracted_at: rawProfile.extracted_at || new Date().toISOString(),
+    page_title: rawProfile.page_title || "",
+    meta: rawProfile.meta || {},
+    candidate_name: rawProfile.candidate_name || "",
+    candidate_description: rawProfile.candidate_description || "",
+    candidate_image: rawProfile.candidate_image || "",
+    image_candidates: rawProfile.image_candidates || [],
+    emails: rawProfile.emails || [],
+    phones: rawProfile.phones || [],
+    contact_links: rawProfile.contact_links || [],
+    social_links: rawProfile.social_links || []
+  }
 }
 
 function normalizeMappedProfile(profile, rawProfile) {
@@ -734,6 +954,134 @@ const projectItemSchema = {
       items: { type: "string" }
     },
     project_url: { type: "string" }
+  }
+}
+
+const linkItemSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: [
+    "text",
+    "href"
+  ],
+  properties: {
+    text: { type: "string" },
+    href: { type: "string" }
+  }
+}
+
+const partialProfileSummarySchema = {
+  type: "object",
+  additionalProperties: false,
+  required: [
+    "first_name",
+    "last_name",
+    "full_name",
+    "headline",
+    "job_title",
+    "bio",
+    "location",
+    "profile_photo_url"
+  ],
+  properties: {
+    first_name: { type: "string" },
+    last_name: { type: "string" },
+    full_name: { type: "string" },
+    headline: { type: "string" },
+    job_title: { type: "string" },
+    bio: { type: "string" },
+    location: { type: "string" },
+    profile_photo_url: { type: "string" }
+  }
+}
+
+const partialContactInfoSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: [
+    "email",
+    "phone",
+    "website",
+    "linkedin",
+    "github",
+    "twitter"
+  ],
+  properties: {
+    email: { type: "string" },
+    phone: { type: "string" },
+    website: { type: "string" },
+    linkedin: { type: "string" },
+    github: { type: "string" },
+    twitter: { type: "string" }
+  }
+}
+
+const partialOrganizationSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: [
+    "company_name",
+    "company_website",
+    "industry",
+    "company_size",
+    "company_location"
+  ],
+  properties: {
+    company_name: { type: "string" },
+    company_website: { type: "string" },
+    industry: { type: "string" },
+    company_size: { type: "string" },
+    company_location: { type: "string" }
+  }
+}
+
+const PARTIAL_EXTRACTION_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: [
+    "profile_summary",
+    "contact_info",
+    "organization",
+    "skills",
+    "experience",
+    "education",
+    "certifications",
+    "languages",
+    "projects",
+    "links"
+  ],
+  properties: {
+    profile_summary: partialProfileSummarySchema,
+    contact_info: partialContactInfoSchema,
+    organization: partialOrganizationSchema,
+    skills: {
+      type: "array",
+      items: { type: "string" }
+    },
+    experience: {
+      type: "array",
+      items: experienceItemSchema
+    },
+    education: {
+      type: "array",
+      items: educationItemSchema
+    },
+    certifications: {
+      type: "array",
+      items: certificationItemSchema
+    },
+    languages: {
+      type: "array",
+      items: { type: "string" }
+    },
+    projects: {
+      type: "array",
+      items: projectItemSchema
+    },
+    links: {
+      type: "array",
+      items: linkItemSchema
+    }
   }
 }
 
