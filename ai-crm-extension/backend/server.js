@@ -59,18 +59,7 @@ app.post("/extract", (req, res) => {
 })
 
 async function mapWithOpenAI(rawProfile) {
-  console.log(`\n🤖 Sending raw profile directly to AI for mapping...`)
-  console.log(`📄 Visible text length: ${rawProfile.visible_text?.length || 0} chars`)
-  
-  // Send raw text directly to AI for final mapping
   const mappedProfile = await mapRawProfileDirectly(rawProfile)
-  
-  console.log(`\n✅ Final mapped profile:`)
-  console.log(`   - parsedExperience: ${mappedProfile.parsedExperience?.length || 0}`)
-  console.log(`   - parsedEducation: ${mappedProfile.parsedEducation?.length || 0}`)
-  console.log(`   - parsedSkills: ${mappedProfile.parsedSkills?.length || 0}`)
-  console.log(`   - languages: ${mappedProfile.languages?.length || 0}`)
-
   return normalizeMappedProfile(mappedProfile, rawProfile)
 }
 

@@ -108,21 +108,7 @@ async function buildRawProfile() {
   const projectsSections = findLabeledSections(["projects", "project"])
   const languagesSections = findLabeledSections(["languages", "language"])
 
-  // Debug logging
-  console.log("🔍 SECTION EXTRACTION DEBUG:")
-  console.log("Skills sections found:", skillsSections.length, "Total chars:", skillsSections.join("").length)
-  console.log("Experience sections found:", experienceSections.length, "Total chars:", experienceSections.join("").length)
-  console.log("Education sections found:", educationSections.length, "Total chars:", educationSections.join("").length)
-  console.log("Languages sections found:", languagesSections.length, "Total chars:", languagesSections.join("").length)
-  
-  // If no sections found, use full visible text as fallback
-  console.log("📄 Full page text length:", visibleText.length, "chars")
-  console.log("📄 Distilled text length:", distilledText.length, "chars")
-  
-  // Use visible_text as primary source when sections aren't found
   const primaryText = visibleText.length > distilledText.length ? visibleText : distilledText
-  console.log("⚠️ Using fallback: sending full page text for missing sections")
-  console.log("📤 Primary text length:", primaryText.length, "chars")
 
   return {
     source_platform:  sourceHost,
@@ -450,14 +436,12 @@ function findLabeledSections(labels) {
         if (sectionText.length >= 50 && !seenTexts.has(sectionText)) {
           seenTexts.add(sectionText)
           sections.push(sectionText)
-          console.log(`✅ Captured section: ${sectionText.substring(0, 50)}... (${sectionText.length} chars)`)
         }
       }
       
       // Start new section
       captureMode = true
       currentSection = [block]
-      console.log(`✅ Found section header: "${block.split('\n')[0]}"`)
       continue
     }
     
@@ -471,7 +455,6 @@ function findLabeledSections(labels) {
         if (sectionText.length >= 50 && !seenTexts.has(sectionText)) {
           seenTexts.add(sectionText)
           sections.push(sectionText)
-          console.log(`✅ Captured section: ${sectionText.substring(0, 50)}... (${sectionText.length} chars)`)
         }
       }
       captureMode = false
@@ -491,11 +474,8 @@ function findLabeledSections(labels) {
     if (sectionText.length >= 50 && !seenTexts.has(sectionText)) {
       seenTexts.add(sectionText)
       sections.push(sectionText)
-      console.log(`✅ Captured final section: ${sectionText.substring(0, 50)}... (${sectionText.length} chars)`)
     }
   }
-
-  console.log(`📊 Total sections found for [${labels.join(", ")}]: ${sections.length}`)
   
   return sections
 }
