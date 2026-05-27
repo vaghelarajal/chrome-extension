@@ -1,4 +1,3 @@
 backend/.env
 backend/scraped-*.json
 backend/node_modules/
-PROJECT_LOG.md
