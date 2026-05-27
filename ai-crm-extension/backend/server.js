@@ -857,6 +857,76 @@ function normalizeMappedProfile(profile, rawProfile) {
   return createCandidateSchemaProfile(normalizedProfile, rawProfile)
 }
 
+function validateSocialMediaLinks(socialMedia, allLinks) {
+  // Helper function to check if URL matches platform
+  const isLinkedIn = (url) => /linkedin\.com/i.test(url)
+  const isTwitter = (url) => /(twitter\.com|x\.com)/i.test(url)
+  const isGitHub = (url) => /github\.com/i.test(url)
+  const isFacebook = (url) => /facebook\.com/i.test(url)
+  const isInstagram = (url) => /instagram\.com/i.test(url)
+  
+  // Validate each field
+  const validated = {
+    linkedin: "",
+    twitter: "",
+    github: "",
+    facebook: "",
+    instagram: ""
+  }
+  
+  // Validate LinkedIn
+  if (socialMedia.linkedin && isLinkedIn(socialMedia.linkedin)) {
+    validated.linkedin = socialMedia.linkedin
+  } else if (socialMedia.linkedin) {
+    // Wrong link in linkedin field, try to find correct one
+    validated.linkedin = findLink(allLinks, "linkedin.com")
+  } else {
+    validated.linkedin = ""
+  }
+  
+  // Validate Twitter
+  if (socialMedia.twitter && isTwitter(socialMedia.twitter)) {
+    validated.twitter = socialMedia.twitter
+  } else if (socialMedia.twitter) {
+    // Wrong link in twitter field, try to find correct one
+    validated.twitter = findLink(allLinks, "twitter.com") || findLink(allLinks, "x.com")
+  } else {
+    validated.twitter = ""
+  }
+  
+  // Validate GitHub
+  if (socialMedia.github && isGitHub(socialMedia.github)) {
+    validated.github = socialMedia.github
+  } else if (socialMedia.github) {
+    // Wrong link in github field, try to find correct one
+    validated.github = findLink(allLinks, "github.com")
+  } else {
+    validated.github = ""
+  }
+  
+  // Validate Facebook
+  if (socialMedia.facebook && isFacebook(socialMedia.facebook)) {
+    validated.facebook = socialMedia.facebook
+  } else if (socialMedia.facebook) {
+    // Wrong link in facebook field, try to find correct one
+    validated.facebook = findLink(allLinks, "facebook.com")
+  } else {
+    validated.facebook = ""
+  }
+  
+  // Validate Instagram
+  if (socialMedia.instagram && isInstagram(socialMedia.instagram)) {
+    validated.instagram = socialMedia.instagram
+  } else if (socialMedia.instagram) {
+    // Wrong link in instagram field, try to find correct one
+    validated.instagram = findLink(allLinks, "instagram.com")
+  } else {
+    validated.instagram = ""
+  }
+  
+  return validated
+}
+
 function createCandidateSchemaProfile(profile, rawProfile) {
   const personalInfo = profile.personal_info || {}
   const contactInfo = profile.contact_info || {}
@@ -874,10 +944,19 @@ function createCandidateSchemaProfile(profile, rawProfile) {
   const title = profile.title || personalInfo.job_title || personalInfo.headline || ""
   const topEducation = parsedEducation[0] || {}
 
+  // Validate and categorize social media links
+  const validatedSocialMedia = validateSocialMediaLinks({
+    linkedin: linkedInUrl || socialMedia.linkedin || "",
+    twitter: socialMedia.twitter || contactInfo.twitter || "",
+    github: socialMedia.github || contactInfo.github || "",
+    facebook: socialMedia.facebook || "",
+    instagram: socialMedia.instagram || ""
+  }, rawProfile.links || [])
+
   return {
     firstName,
     lastName,
-    linkedInUrl,
+    linkedInUrl: validatedSocialMedia.linkedin,
     title,
     currentPosition: profile.currentPosition || title,
     location: profile.location || personalInfo.location || "",
@@ -896,13 +975,7 @@ function createCandidateSchemaProfile(profile, rawProfile) {
     phone: rawProfile.phones?.[0] || profile.phone || contactInfo.phone || "",
     skype: profile.skype || "",
     otherContact: profile.otherContact || "",
-    parsedSocialMedia: {
-      linkedin: linkedInUrl || socialMedia.linkedin || "",
-      twitter: socialMedia.twitter || contactInfo.twitter || "",
-      github: socialMedia.github || contactInfo.github || "",
-      facebook: socialMedia.facebook || "",
-      instagram: socialMedia.instagram || ""
-    },
+    parsedSocialMedia: validatedSocialMedia,
     yearsOfExperience: calculateYearsOfExperience(parsedExperience, profile.yearsOfExperience),
     source: "extension",
     visibility: profile.visibility || "private",
