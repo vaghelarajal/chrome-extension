@@ -1,4 +1,4 @@
-require("dotenv").config()
+require("dotenv").config({ silent: true })
 
 const crypto = require("crypto")
 
@@ -18,7 +18,7 @@ app.get("/", (req, res) => {
   res.send("Backend is running")
 })
 
-app.post("/map-profile", async (req, res) => {
+app.post("/scrape/parse-text", async (req, res) => {
   const rawProfile = req.body
 
   if (!rawProfile || typeof rawProfile !== "object") {
@@ -39,8 +39,35 @@ app.post("/map-profile", async (req, res) => {
       data: mappedProfile
     })
   } catch (error) {
-    console.error("AI mapping error:", error.message)
+    console.error("Text parsing error:", error.message)
+    res.status(500).json({
+      success: false,
+      error: error.message
+    })
+  }
+})
 
+app.post("/scrape/parse-image", async (req, res) => {
+  const { screenshots, missingFields, textResult } = req.body
+
+  if (!screenshots || !missingFields || !textResult) {
+    res.status(400).json({
+      success: false,
+      error: "Screenshots, missing fields, and text result are required"
+    })
+    return
+  }
+
+  try {
+    const visionExtraction = await extractWithVisionAPI(screenshots, missingFields)
+    const mergedProfile = mergeMissingFields(textResult, visionExtraction)
+
+    res.json({
+      success: true,
+      data: mergedProfile
+    })
+  } catch (error) {
+    console.error("Vision parsing error:", error.message)
     res.status(500).json({
       success: false,
       error: error.message
@@ -61,6 +88,136 @@ app.post("/extract", (req, res) => {
 async function mapWithOpenAI(rawProfile) {
   const mappedProfile = await mapRawProfileDirectly(rawProfile)
   return normalizeMappedProfile(mappedProfile, rawProfile)
+}
+
+async function extractWithVisionAPI(screenshots, missingFields) {
+  if (screenshots.length === 0) {
+    throw new Error("No screenshots provided")
+  }
+  
+  // Prepare image inputs for OpenAI
+  const imageInputs = screenshots.map(screenshot => ({
+    type: "image_url",
+    image_url: {
+      url: screenshot.dataUrl,
+      detail: "high"  // Use "high" for better OCR
+    }
+  }))
+  
+  const systemPrompt = `You are a LinkedIn profile data extractor. You will receive ${screenshots.length} screenshots from different parts of a LinkedIn profile page.
+
+CRITICAL INSTRUCTIONS:
+1. Look at ALL ${screenshots.length} images - they show different sections of the same profile
+2. Extract EVERY entry you see across all images
+3. Combine information from all screenshots into one complete profile
+
+EXPERIENCE - Extract ALL jobs you see across all images:
+- company_name: Company name
+- position: Job title/role  
+- location: Location (empty string if not visible)
+- service_period: Full date range (e.g., "Feb 2014 - Present · 12 yrs")
+
+EDUCATION - Extract ALL schools you see across all images:
+- institution: School/University name
+- degree: Degree name
+- field: Field of study
+- graduationDate: Year range (e.g., "2010 – 2014")
+
+SKILLS - Extract ALL skills you see across all images:
+- skill_name: Skill name
+
+CERTIFICATES - Extract ALL certificates:
+- name: Certificate name
+- issuedDate: Issue date
+- expiryDate: Expiry date (empty if none)
+
+LANGUAGES - Extract ALL languages as strings
+
+Scan ALL ${screenshots.length} images carefully and return complete structured data.`
+
+  const response = await fetch("https://api.openai.com/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      model: OPENAI_MODEL,
+      messages: [
+        {
+          role: "system",
+          content: systemPrompt
+        },
+        {
+          role: "user",
+          content: [
+            { 
+              type: "text", 
+              text: `Extract ALL profile data from these ${screenshots.length} LinkedIn screenshots. Each image shows a different part of the profile. Combine all information into one complete profile.`
+            },
+            ...imageInputs
+          ]
+        }
+      ],
+      response_format: {
+        type: "json_schema",
+        json_schema: {
+          name: "recruiter_candidate_schema",
+          strict: true,
+          schema: PROFILE_JSON_SCHEMA
+        }
+      },
+      max_tokens: 4000
+    })
+  })
+  
+  const result = await response.json()
+  
+  if (!response.ok) {
+    console.error("❌ Vision API Error:", result)
+    throw new Error(result.error?.message || "Vision API failed")
+  }
+  
+  const outputText = result.choices?.[0]?.message?.content
+  if (!outputText) {
+    throw new Error("No content in vision API response")
+  }
+  
+  const extracted = JSON.parse(outputText)
+  return extracted
+}
+
+function mergeMissingFields(textBased, visionBased) {
+  const merged = { ...textBased }
+  
+  // Merge only missing fields from vision
+  if (!merged.parsedExperience || merged.parsedExperience.length === 0) {
+    merged.parsedExperience = visionBased.parsedExperience || []
+  }
+  
+  if (!merged.parsedEducation || merged.parsedEducation.length === 0) {
+    merged.parsedEducation = visionBased.parsedEducation || []
+    merged.university = visionBased.university || ""
+    merged.diploma = visionBased.diploma || ""
+    merged.graduationDate = visionBased.graduationDate || ""
+  }
+  
+  if (!merged.parsedSkills || merged.parsedSkills.length === 0) {
+    merged.parsedSkills = visionBased.parsedSkills || []
+  }
+  
+  if (merged.yearsOfExperience === 0 && visionBased.yearsOfExperience > 0) {
+    merged.yearsOfExperience = visionBased.yearsOfExperience
+  }
+  
+  return merged
+}
+
+function extractOutputText(result) {
+  return result.output
+    ?.flatMap((item) => item.content || [])
+    ?.find((content) => content.type === "output_text")
+    ?.text
 }
 
 async function mapRawProfileDirectly(rawProfile) {

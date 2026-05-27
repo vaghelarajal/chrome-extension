@@ -1,7 +1,91 @@
 if (!window.profileScraperContentLoaded) {
   window.profileScraperContentLoaded = true
 
-  chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+    // Handle scroll commands from background script
+    if (msg.type === "SCROLL_TO" || msg.type === "SCROLL_TO_ABSOLUTE") {
+      const targetScroll = msg.scrollY
+      
+      // Find scrollable element
+      const scrollableElement = findScrollableElement()
+      
+      if (scrollableElement) {
+        scrollableElement.scrollTop = targetScroll
+      } else {
+        window.scrollTo({ top: targetScroll, behavior: 'instant' })
+        document.documentElement.scrollTop = targetScroll
+        document.body.scrollTop = targetScroll
+      }
+      
+      setTimeout(() => {
+        const actualScroll = scrollableElement 
+          ? scrollableElement.scrollTop 
+          : (window.scrollY || document.documentElement.scrollTop || document.body.scrollTop)
+        sendResponse({ success: true, scrollY: actualScroll })
+      }, 200)
+      return true
+    }
+    
+    if (msg.type === "SCROLL_BY") {
+      const scrollAmount = msg.scrollY === 'viewport' ? window.innerHeight : msg.scrollY
+      
+      // Get current position
+      let currentScroll = window.scrollY || document.documentElement.scrollTop || document.body.scrollTop
+      const targetScroll = currentScroll + scrollAmount
+      
+      // Find the actual scrollable element
+      const scrollableElement = findScrollableElement()
+      
+      if (scrollableElement) {
+        // Scroll the container
+        scrollableElement.scrollTop = targetScroll
+        scrollableElement.scrollBy({ top: scrollAmount, behavior: 'smooth' })
+      } else {
+        // Try window scroll
+        window.scrollTo({ top: targetScroll, behavior: 'smooth' })
+        document.documentElement.scrollTop = targetScroll
+        document.body.scrollTop = targetScroll
+      }
+      
+      setTimeout(() => {
+        const actualScroll = scrollableElement 
+          ? scrollableElement.scrollTop 
+          : (window.scrollY || document.documentElement.scrollTop || document.body.scrollTop)
+        sendResponse({ success: true, scrollY: actualScroll })
+      }, 200)
+      return true
+    }
+    
+    function findScrollableElement() {
+      // Check common LinkedIn scrollable containers
+      const selectors = [
+        'main',
+        '[role="main"]',
+        '.scaffold-layout__main',
+        '.core-rail',
+        'body > div',
+        '#main'
+      ]
+      
+      for (const selector of selectors) {
+        const element = document.querySelector(selector)
+        if (element && element.scrollHeight > element.clientHeight) {
+          return element
+        }
+      }
+      
+      // Find any scrollable element
+      const allElements = document.querySelectorAll('*')
+      for (const element of allElements) {
+        if (element.scrollHeight > element.clientHeight + 10 && 
+            element.clientHeight > 400) {
+          return element
+        }
+      }
+      
+      return null
+    }
+    
     if (msg.type !== "EXTRACT_PAGE") {
       return false
     }
@@ -9,33 +93,41 @@ if (!window.profileScraperContentLoaded) {
     preparePageForScraping()
       .then(async () => {
         const rawProfile = await buildRawProfile()
+        const confidence = rawProfile.confidence?.score || 0
 
-        chrome.runtime.sendMessage(
-          { type: "MAP_PROFILE_WITH_AI", payload: rawProfile },
-          (response) => {
-            if (chrome.runtime.lastError) {
-              sendResponse({
-                success: false,
-                error: chrome.runtime.lastError.message
-              })
-              return
-            }
+        console.log(`📊 Confidence: ${confidence}%`)
 
-            if (!response?.success) {
+        // PRODUCTION: Use text extraction for high confidence profiles
+        if (confidence >= 60) {  // Production threshold
+          // HIGH confidence - use text-based extraction
+          chrome.runtime.sendMessage(
+            { type: "MAP_PROFILE_TEXT", payload: rawProfile },
+            (response) => {
+              if (chrome.runtime.lastError) {
+                sendResponse({ success: false, error: chrome.runtime.lastError.message })
+                return
+              }
+              console.log(JSON.stringify(response.data, null, 2))
               sendResponse(response)
-              return
             }
-
-            console.log(JSON.stringify(response.data, null, 2))
-            sendResponse(response)
-          }
-        )
+          )
+        } else {
+          // LOW confidence - use vision fallback
+          chrome.runtime.sendMessage(
+            { type: "MAP_PROFILE_VISION", payload: rawProfile },
+            (response) => {
+              if (chrome.runtime.lastError) {
+                sendResponse({ success: false, error: chrome.runtime.lastError.message })
+                return
+              }
+              console.log(JSON.stringify(response.data, null, 2))
+              sendResponse(response)
+            }
+          )
+        }
       })
       .catch((error) => {
-        sendResponse({
-          success: false,
-          error: error.message
-        })
+        sendResponse({ success: false, error: error.message })
       })
 
     return true
