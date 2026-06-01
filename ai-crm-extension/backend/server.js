@@ -167,7 +167,7 @@ Scan ALL ${screenshots.length} images carefully and return complete structured d
           schema: PROFILE_JSON_SCHEMA
         }
       },
-      max_tokens: 4000
+      max_tokens: 3000
     })
   })
   
