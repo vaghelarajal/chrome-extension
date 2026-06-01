@@ -32,7 +32,12 @@ extractBtn.addEventListener("click", async () => {
   try {
     const response = await sendExtractMessage(currentTab.id)
 
-    if (!response?.success || !response.data) {
+    if (!response?.success) {
+      showStatus(response?.error || "No profile data found on this page.", true)
+      return
+    }
+
+    if (!response.data) {
       showStatus("No profile data found on this page.", true)
       return
     }
@@ -121,14 +126,12 @@ async function getRecentProfiles() {
 }
 
 function createProfileCard(profile) {
-  const personalInfo = profile.personal_info || {}
-  const contactInfo = profile.contact_info || {}
-  const fullName = personalInfo.full_name || [
-    personalInfo.first_name,
-    personalInfo.last_name
-  ]
-    .filter(Boolean)
-    .join(" ") || "Unknown profile"
+  const fullName = [
+      profile.firstName,
+      profile.lastName
+    ]
+      .filter(Boolean)
+      .join(" ") || "Unknown profile"
 
   const card = document.createElement("article")
   card.className = "profile-card"
@@ -146,11 +149,11 @@ function createProfileCard(profile) {
 
   const email = document.createElement("div")
   email.className = "profile-email"
-  email.textContent = contactInfo.email || "No email found"
+  email.textContent = profile.email || "No email found"
 
   const domain = document.createElement("div")
   domain.className = "profile-domain"
-  domain.textContent = profile.source_platform || hostFromUrl(profile.source_url) || "Current page"
+  domain.textContent = hostFromUrl(profile.linkedInUrl) || profile.source || "Current page"
 
   const time = document.createElement("div")
   time.className = "profile-time"
